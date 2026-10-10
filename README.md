@@ -1,10 +1,10 @@
-# AgentForge
+﻿# AgentForge
 
-[![CI](https://github.com/YOUR_USERNAME/agentforge/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_USERNAME/agentforge/actions)
+[![CI](https://github.com/MuhammadSyaiful16/agentforge/actions/workflows/ci.yml/badge.svg)](https://github.com/MuhammadSyaiful16/agentforge/actions)
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
-**A production-minded agent framework built from first principles — no LangChain, ~1,000 lines.**
+**A production-minded agent framework built from first principles â€” no LangChain, ~1,000 lines.**
 Tool use, memory, guardrails, tracing, multi-agent orchestration and an eval harness,
 designed to show *how agents actually work* and *what it takes to run them safely*.
 
@@ -20,7 +20,7 @@ AgentForge treats those as first-class design problems.
 |---|---|
 | **Agent loop** | Native tool use, parallel read-only tool calls, step/token/time budgets |
 | **Typed tools** | `@tool` derives JSON schema from type hints, validates args, returns errors to the model |
-| **Multi-agent** | Planner → DAG of parallel workers → synthesizer → critic (reflection loop) |
+| **Multi-agent** | Planner â†’ DAG of parallel workers â†’ synthesizer â†’ critic (reflection loop) |
 | **Structured output** | Forced tool call + pydantic validation + self-repair retries |
 | **Memory** | Context compaction (never splits tool pairs) + persistent SQLite long-term memory |
 | **Safety** | Default-deny approvals, loop detection, injection-resistant tool output, sandboxed file tools, AST-safe calculator |
@@ -32,7 +32,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design decisions and th
 ## Quickstart
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/agentforge && cd agentforge
+git clone https://github.com/MuhammadSyaiful16/agentforge && cd agentforge
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 cp .env.example .env && export ANTHROPIC_API_KEY=sk-ant-...
@@ -111,7 +111,7 @@ tests/              offline test-suite with fake LLMs
 ```
 
 ## Roadmap
-Streaming · MCP client · embedding-based memory · USD cost budgets · container sandbox for code tools.
+Streaming Â· MCP client Â· embedding-based memory Â· USD cost budgets Â· container sandbox for code tools.
 
 ## License
 MIT
