@@ -4,11 +4,13 @@
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
-**A production-minded agent framework built from first principles — no LangChain, ~1,000 lines.**
+**A production-minded agent framework built from first principles — no LangChain, ~2,600 lines.**
 Tool use, memory, guardrails, tracing, multi-agent orchestration and an eval harness,
 designed to show *how agents actually work* and *what it takes to run them safely*.
 
 > Bahasa Indonesia: lihat [README.id.md](README.id.md)
+>
+> Project write-up with architecture diagram, design decisions and debugging stories: [docs/CASE_STUDY.md](docs/CASE_STUDY.md)
 
 ## Why this exists
 

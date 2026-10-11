@@ -1,7 +1,7 @@
 # Architecture & Design Decisions
 
-AgentForge is deliberately framework-free: the whole agent runtime is ~1,000 lines you can
-read in an afternoon. This document explains *why* it is shaped the way it is.
+AgentForge is deliberately framework-free: the whole agent runtime is ~2,600 lines you can
+read in a day. This document explains *why* it is shaped the way it is.
 
 ## Component map
 
