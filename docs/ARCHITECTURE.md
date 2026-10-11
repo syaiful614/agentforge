@@ -88,9 +88,16 @@ tracing backend.
 `evals/run_evals.py` checks the answer *and* which tools ran, how many steps were used, and
 whether forbidden side effects occurred. `--repeat N` measures pass-rate under stochasticity.
 
+### 10. Streaming without changing the contract
+Streaming is one optional `on_text` callback on `LLM.generate()`; the adapter still returns the
+complete `LLMResponse`. That keeps every other component (budgets, loop detection, approvals,
+tracing, structured output) ignorant of streaming. Failure semantics are explicit: connection
+errors are retried, but a stream that dies midway is not (the user has already seen partial text),
+and the timeout is per read, so a slow-but-alive local model is never cut off.
+
 ## Known limitations / roadmap
 - Long-term memory uses keyword overlap; swap in embeddings/pgvector behind `LongTermMemory`.
 - Tools run in-process; untrusted code execution needs a real sandbox (container/gVisor).
-- No streaming yet; add `generate_stream()` to the `LLM` protocol.
+- Streaming covers single-agent runs only; orchestrator workers run in parallel, so their output would interleave.
 - Cost accounting is token-based; add per-model pricing for USD budgets.
 - MCP: HTTP transport, resources/prompts, and `tools/list_changed` refresh (stdio tools only today).

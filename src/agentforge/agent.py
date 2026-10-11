@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
@@ -67,6 +68,8 @@ class Agent:
         max_parallel_tools: int = 4,
         loop_threshold: int = 3,
         trace_outputs: str = "errors",
+        on_text: Callable[[str], None] | None = None,
+        on_tool: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         self.llm = llm
         self.tools = tools
@@ -81,6 +84,8 @@ class Agent:
         if trace_outputs not in ("none", "errors", "all"):
             raise ValueError("trace_outputs must be 'none', 'errors' or 'all'")
         self.trace_outputs = trace_outputs  # outputs can contain private data: errors-only default
+        self.on_text = on_text  # live text deltas (streaming); None = non-streaming
+        self.on_tool = on_tool  # called just before a tool runs: (name, input)
         self._loops = LoopDetector(loop_threshold)
 
     # ------------------------------------------------------------------ public
@@ -94,6 +99,19 @@ class Agent:
         self.tracer.event("agent_start", task=task)
 
         steps, usage = 0, Usage()
+        state = {"break": False, "step_text": False}
+        extra: dict[str, Any] = {}
+        if self.on_text is not None:
+            emit = self.on_text
+
+            def relay(delta: str) -> None:
+                if state["break"]:  # a previous step streamed text, then called tools
+                    state["break"] = False
+                    emit("\n\n")
+                state["step_text"] = True
+                emit(delta)
+
+            extra["on_text"] = relay
         called: list[str] = []
         last_text, stop = "", "end_turn"
         try:
@@ -110,11 +128,13 @@ class Agent:
                         self.tracer.event("memory_compacted")
 
                 with self.tracer.span("llm_call", step=steps) as info:
+                    state["step_text"] = False
                     resp = self.llm.generate(
                         system=self.system,
                         messages=list(self.memory.messages),
                         tools=self.tools.schemas() or None,
                         max_tokens=self.max_tokens,
+                        **extra,
                     )
                     info.update(
                         input_tokens=resp.usage.input_tokens,
@@ -133,6 +153,7 @@ class Agent:
                     break
 
                 called.extend(c.name for c in calls)
+                state["break"] = state["step_text"]
                 self.memory.add_tool_results(self._execute_all(calls))
         except MaxStepsExceeded as exc:
             stop = "max_steps"
@@ -186,6 +207,8 @@ class Agent:
             self.tracer.event("tool_denied", tool=call.name, input=call.input)
             return self._result_block(call, msg, True)
 
+        if self.on_tool is not None:
+            self.on_tool(call.name, call.input)
         with self.tracer.span("tool_call", tool=call.name, input=call.input) as info:
             result = tool.run(call.input)
             info.update(is_error=result.is_error, output_chars=len(result.content))

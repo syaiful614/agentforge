@@ -151,6 +151,41 @@ python evals/run_evals.py
 Free-tier limits and model names change often; check your provider's docs. Smaller models
 may fail some eval cases (that is exactly what the eval harness is for).
 
+## Streaming
+
+Add `--stream` to see the answer as it is generated, and which tools run while you wait:
+
+```bash
+agentforge run "Count the words in 'agent developer belajar setiap hari'" --stream \
+  --provider openai --model qwen2.5:3b --mcp-config examples/mcp.json --mcp-only
+agentforge chat --stream
+```
+
+Text goes to stdout and tool activity (`· tool_name(args)`) to stderr, so piping the answer
+stays clean. Steps are separated by a blank line. `--stream` is not available with `--orchestrate`
+(parallel workers would interleave) or `--json`.
+
+As a library, pass callbacks to the agent:
+
+```python
+agent = Agent(llm, tools,
+              on_text=lambda delta: print(delta, end="", flush=True),
+              on_tool=lambda name, args: print(f"[{name}]"))
+```
+
+Design notes:
+
+- One optional `on_text` parameter on `LLM.generate()`. The reply is still returned whole, so the
+  agent loop, budgets, traces and approvals behave exactly as without streaming.
+- OpenAI-compatible endpoints use server-sent events (stdlib only). Tool-call arguments that arrive
+  in fragments are reassembled; if a server omits token usage it is estimated so budgets still hold.
+- The timeout becomes an *inactivity* timeout while streaming, which suits slow local models.
+- Only the connection phase is retried. A stream that breaks midway raises a clear error instead of
+  silently replaying text the user already saw.
+- Verified by a test that runs a real HTTP server and proves the first chunk reaches `on_text`
+  *before* the server sends the rest. The Anthropic path uses the SDK's `messages.stream` and is
+  covered with a fake SDK only.
+
 ## Use as a library
 
 ```python
@@ -195,7 +230,7 @@ make eval     # live evals against the real model (needs ANTHROPIC_API_KEY)
 python evals/run_evals.py --repeat 3   # pass-rate under stochasticity
 ```
 
-The unit suite (110 tests, including real MCP subprocess round-trips) uses scripted/fake LLMs, so the loop, guardrails, memory
+The unit suite (131 tests, including real MCP subprocess round-trips) uses scripted/fake LLMs, so the loop, guardrails, memory
 compaction, DAG planning and review loop are verified without network access.
 
 ## Eval results
@@ -247,7 +282,7 @@ tests/              offline test-suite with fake LLMs
 ```
 
 ## Roadmap
-Streaming · MCP over HTTP + resources/prompts · embedding-based memory · USD cost budgets · container sandbox for code tools.
+MCP over HTTP + resources/prompts · embedding-based memory · USD cost budgets · container sandbox for code tools.
 
 ## License
 MIT

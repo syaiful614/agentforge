@@ -7,10 +7,12 @@ agent loop free of provider-specific glue and makes it trivial to fake in tests.
 
 from __future__ import annotations
 
+import http.client
 import json
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -71,6 +73,7 @@ class LLM(Protocol):
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int = 2048,
         tool_choice: dict[str, Any] | None = None,
+        on_text: Callable[[str], None] | None = None,
     ) -> LLMResponse: ...
 
 
@@ -104,6 +107,7 @@ class AnthropicLLM:
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int = 2048,
         tool_choice: dict[str, Any] | None = None,
+        on_text: Callable[[str], None] | None = None,
     ) -> LLMResponse:
         system_param: Any = system
         if self._cache_system:
@@ -122,7 +126,13 @@ class AnthropicLLM:
             kwargs["tool_choice"] = tool_choice
 
         try:
-            resp = self._client.messages.create(**kwargs)
+            if on_text is None:
+                resp = self._client.messages.create(**kwargs)
+            else:
+                with self._client.messages.stream(**kwargs) as stream:
+                    for delta in stream.text_stream:
+                        on_text(delta)
+                    resp = stream.get_final_message()
         except Exception as exc:
             if self._api_error is not None and isinstance(exc, self._api_error):
                 raise LLMError(_friendly_anthropic_error(exc)) from exc
@@ -213,8 +223,13 @@ class OpenAICompatLLM:
             "raise AGENTFORGE_TIMEOUT (seconds) or use a smaller/faster model."
         )
 
-    def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
-        url = f"{self.base_url}/chat/completions"
+    @property
+    def _url(self) -> str:
+        return f"{self.base_url}/chat/completions"
+
+    def _open(self, payload: dict[str, Any]) -> Any:
+        """Open the HTTP response. Only the connection phase is retried, never a started stream."""
+        url = self._url
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
@@ -223,8 +238,7 @@ class OpenAICompatLLM:
                 url, data=json.dumps(payload).encode(), headers=headers, method="POST"
             )
             try:
-                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                    return json.loads(resp.read())
+                return urllib.request.urlopen(req, timeout=self.timeout)
             except urllib.error.HTTPError as exc:
                 body = exc.read().decode(errors="replace")[:500]
                 if exc.code in (429, 500, 502, 503, 504) and attempt < self.max_retries:
@@ -239,9 +253,100 @@ class OpenAICompatLLM:
                     time.sleep(2**attempt)
                     continue
                 raise LLMError(f"cannot reach {url}: {exc.reason}. Is the server running?") from exc
-            except TimeoutError as exc:  # raised while waiting for the response body
+            except TimeoutError as exc:
                 raise self._timeout_error(url) from exc
         raise LLMError("unreachable")  # pragma: no cover
+
+    def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            with self._open(payload) as resp:
+                return json.loads(resp.read())
+        except TimeoutError as exc:  # raised while waiting for the response body
+            raise self._timeout_error(self._url) from exc
+
+    def _stream(self, payload: dict[str, Any], on_text: Callable[[str], None]) -> LLMResponse:
+        """Server-sent events: forward text deltas live, assemble tool calls, return the full reply.
+
+        The timeout is per socket read, i.e. an *inactivity* timeout, which is what you want for
+        a slow local model that keeps producing tokens.
+        """
+        body = {**payload, "stream": True, "stream_options": {"include_usage": True}}
+        text_parts: list[str] = []
+        calls: dict[int, dict[str, str]] = {}
+        finish: str | None = None
+        usage: dict[str, Any] | None = None
+        try:
+            with self._open(body) as resp:
+                for raw in resp:
+                    line = raw.decode("utf-8", errors="replace").strip()
+                    if not line.startswith("data:"):
+                        continue  # blank separators and ": keep-alive" comments
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(chunk, dict):
+                        continue
+                    if chunk.get("error"):
+                        raise LLMError(f"{self.base_url} stream error: {chunk['error']}")
+                    usage = chunk.get("usage") or usage
+                    for choice in chunk.get("choices") or []:
+                        delta = choice.get("delta") or {}
+                        piece = delta.get("content")
+                        if piece:
+                            text_parts.append(piece)
+                            on_text(piece)
+                        for tc in delta.get("tool_calls") or []:
+                            slot = calls.setdefault(
+                                tc.get("index", 0), {"id": "", "name": "", "args": ""}
+                            )
+                            if tc.get("id"):
+                                slot["id"] = tc["id"]
+                            fn = tc.get("function") or {}
+                            if fn.get("name"):
+                                slot["name"] = fn["name"]
+                            args = fn.get("arguments")
+                            if isinstance(args, str):
+                                slot["args"] += args
+                            elif isinstance(args, dict):  # some servers send a finished object
+                                slot["args"] = json.dumps(args)
+                        finish = choice.get("finish_reason") or finish
+        except TimeoutError as exc:
+            raise self._timeout_error(self._url) from exc
+        except (OSError, http.client.HTTPException) as exc:
+            raise LLMError(f"stream from {self._url} was interrupted: {exc}") from exc
+
+        content: list[dict[str, Any]] = []
+        text = "".join(text_parts)
+        if text:
+            content.append({"type": "text", "text": text})
+        for idx in sorted(calls):
+            slot = calls[idx]
+            if not slot["name"]:
+                continue
+            try:
+                parsed = json.loads(slot["args"]) if slot["args"] else {}
+            except json.JSONDecodeError:
+                parsed = {}
+            content.append(
+                {
+                    "type": "tool_use",
+                    "id": slot["id"] or f"call_{idx}",
+                    "name": slot["name"],
+                    "input": parsed if isinstance(parsed, dict) else {},
+                }
+            )
+        stop = {"tool_calls": "tool_use", "length": "max_tokens"}.get(finish or "", "end_turn")
+        if usage:
+            used = Usage(usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0))
+        else:  # server ignored stream_options: estimate (~4 chars/token) so budgets still work
+            out_chars = len(text) + sum(len(c["args"]) for c in calls.values())
+            in_chars = len(json.dumps(payload["messages"], default=str))
+            used = Usage(in_chars // 4, out_chars // 4)
+        return LLMResponse(content, stop, used)
 
     def generate(
         self,
@@ -251,6 +356,7 @@ class OpenAICompatLLM:
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int = 2048,
         tool_choice: dict[str, Any] | None = None,
+        on_text: Callable[[str], None] | None = None,
     ) -> LLMResponse:
         payload: dict[str, Any] = {
             "model": self.model,
@@ -274,6 +380,9 @@ class OpenAICompatLLM:
                     "type": "function",
                     "function": {"name": tool_choice["name"]},
                 }
+
+        if on_text is not None:
+            return self._stream(payload, on_text)
 
         data = self._post(payload)
         choice = data["choices"][0]

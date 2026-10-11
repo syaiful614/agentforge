@@ -7,7 +7,7 @@ import atexit
 import json
 import sys
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from .agent import Agent
 from .builtin_tools import default_registry
@@ -65,7 +65,34 @@ def _build(args: argparse.Namespace) -> Runtime:
     return Runtime(llm, tools, tracer, approval, budget, mcp_read_only)
 
 
+class CLIError(Exception):
+    """Invalid combination of command-line options."""
+
+
+class _StreamPrinter:
+    """Writes streamed text to stdout immediately and remembers whether anything was shown."""
+
+    def __init__(self) -> None:
+        self.printed = False
+
+    def __call__(self, delta: str) -> None:
+        self.printed = True
+        sys.stdout.write(delta)
+        sys.stdout.flush()
+
+
+def _announce_tool(name: str, tool_input: dict[str, Any]) -> None:
+    preview = json.dumps(tool_input, ensure_ascii=False)[:80]
+    print(f"\n  · {name}({preview})", file=sys.stderr, flush=True)
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
+    stream = bool(getattr(args, "stream", False))
+    if stream and args.orchestrate:
+        raise CLIError("--stream is not supported with --orchestrate (workers run in parallel)")
+    if stream and args.json:
+        raise CLIError("--stream cannot be combined with --json")
+
     rt = _build(args)
     llm, tools, tracer, approval, budget = rt[:5]
     if args.orchestrate:
@@ -83,12 +110,26 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print(f"\n[{orch_res.tokens} tokens | run {orch_res.run_id}]", file=sys.stderr)
         return 0 if orch_res.ok else 2
 
-    agent = Agent(llm, tools, budget=budget, approval=approval, tracer=tracer)
+    printer = _StreamPrinter()
+    agent = Agent(
+        llm,
+        tools,
+        budget=budget,
+        approval=approval,
+        tracer=tracer,
+        on_text=printer if stream else None,
+        on_tool=_announce_tool if stream else None,
+    )
     res = agent.run(args.task)
     if args.json:
         print(json.dumps({**res.__dict__, "usage": res.usage.total}, default=str, indent=2))
     else:
-        print(res.output)
+        if stream:
+            print()  # finish the streamed line
+            if not printer.printed:  # e.g. stopped by a budget before any text arrived
+                print(res.output)
+        else:
+            print(res.output)
         print(
             f"\n[{res.stop_reason} | {res.steps} steps | {res.usage.total} tokens | "
             f"tools: {', '.join(res.tool_calls) or '-'}]",
@@ -99,7 +140,17 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
 def _cmd_chat(args: argparse.Namespace) -> int:
     llm, tools, tracer, approval, budget = _build(args)[:5]
-    agent = Agent(llm, tools, budget=budget, approval=approval, tracer=tracer)
+    stream = bool(getattr(args, "stream", False))
+    printer = _StreamPrinter()
+    agent = Agent(
+        llm,
+        tools,
+        budget=budget,
+        approval=approval,
+        tracer=tracer,
+        on_text=printer if stream else None,
+        on_tool=_announce_tool if stream else None,
+    )
     print("AgentForge chat. Ctrl-D to exit, /reset to clear memory.", file=sys.stderr)
     while True:
         try:
@@ -111,8 +162,16 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         if line == "/reset":
             agent.reset()
             continue
-        res = agent.run(line)
-        print(f"agent> {res.output}\n")
+        if stream:
+            printer.printed = False
+            print("agent> ", end="", flush=True)
+            res = agent.run(line)
+            if not printer.printed:
+                print(res.output, end="")
+            print("\n")
+        else:
+            res = agent.run(line)
+            print(f"agent> {res.output}\n")
 
 
 def _cmd_mcp_tools(args: argparse.Namespace) -> int:
@@ -155,6 +214,7 @@ def main(argv: list[str] | None = None) -> int:
     common.add_argument("--trace", help="JSONL trace output path")
     common.add_argument("--max-steps", type=int, default=15)
     common.add_argument("--max-tokens", type=int, default=200_000, help="Token budget")
+    common.add_argument("--stream", action="store_true", help="Print the answer as it is generated")
     common.add_argument("-y", "--yes", action="store_true", help="Auto-approve risky tools")
 
     p = argparse.ArgumentParser(prog="agentforge", description=__doc__)
@@ -180,7 +240,7 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     try:
         return int(args.fn(args))
-    except (LLMError, MCPError) as exc:
+    except (LLMError, MCPError, CLIError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 

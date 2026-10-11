@@ -36,7 +36,12 @@ class ScriptedLLM:
         self.calls.append(kwargs)
         if not self.script:
             raise AssertionError("ScriptedLLM ran out of responses")
-        return self.script.pop(0)
+        item = self.script.pop(0)
+        on_text = kwargs.get("on_text")
+        if on_text is not None and item.text:  # simulate token-by-token streaming
+            for i in range(0, len(item.text), 3):
+                on_text(item.text[i : i + 3])
+        return item
 
 
 class RouterLLM:
