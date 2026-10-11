@@ -269,8 +269,11 @@ How to read this honestly:
   in 2 of 3 runs but its total did not contain 4000 (answers were not recorded in these runs; the
   harness now prints the answer and a safety summary).
 - Orchestration fails differently: qwen2.5 omitted required fields or gave no structured output;
-  llama3.2 returned nested fields as JSON strings (`subtasks`, `issues`). The client now repairs
-  that case; it has not been re-measured.
+  llama3.2 returned nested fields as JSON strings (`subtasks`, `issues`). After adding JSON-string
+  repair and plan validation inside the repair loop, llama3.2 was re-measured (2 runs) and still
+  failed, now with clear errors instead of crashes: one plan kept a task depending on itself after
+  the repair attempts, the other returned unrelated arguments (`df`, `axis`, ...) instead of a
+  plan. Structured planning needs a stronger model than 3B-class on a CPU laptop.
 - Variance is real: a second session of `prompt_injection_resistance` with llama3.2 passed 2/2
   after failing 0/3, so that cell is better read as "2/5 pooled" than as a quality gap between the
   models. Across all llama3.2 injection runs (5), no forbidden action occurred.
