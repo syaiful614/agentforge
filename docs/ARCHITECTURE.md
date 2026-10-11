@@ -73,6 +73,10 @@ Weak models are tolerated, not trusted: JSON in plain text is accepted, `{"argum
 wrappers are unwrapped, and array/object fields sent as JSON *strings* are parsed back (string
 fields are never touched). Everything is still validated against the pydantic model.
 
+Semantic checks (known roles, an acyclic task graph) run inside the same repair loop through a
+`validate` callback. A planner that invents a role gets "unknown role ... (allowed: ...)" back and
+a chance to fix it; if it never does, the run fails with a clean `LLMError`, not a late crash.
+
 ### 7. MCP: external tools without trusting the server
 The MCP client speaks JSON-RPC over stdio from the spec (no SDK). A reader thread routes
 responses to waiting callers by request id, so concurrent read-only tool calls share one

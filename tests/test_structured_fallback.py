@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from agentforge import ToolRegistry
 from agentforge.llm import LLMError
 from agentforge.orchestrator import Plan
 from agentforge.structured import StructuredOutputError, structured_output
@@ -101,3 +102,55 @@ def test_invalid_json_in_a_list_field_still_fails_cleanly():
     bad = {"subtasks": "[{not json"}
     with pytest.raises(StructuredOutputError):
         _run(ScriptedLLM([tool_use(("submit_plan", bad))] * 3))
+
+
+# ------------------------------------------------------------------ semantic validation + repair
+def _plan_call(role):
+    return tool_use(("submit_plan", {"subtasks": [{"id": "t1", "goal": "g", "role": role}]}))
+
+
+def test_validator_failure_is_fed_back_and_the_model_can_repair_it():
+    from agentforge.orchestrator import validate_plan
+
+    llm = ScriptedLLM([_plan_call("analytic-tool"), _plan_call("analyst")])
+    plan = structured_output(
+        llm, system="s", prompt="p", tool_name="submit_plan", tool_description="d",
+        model_cls=Plan, validate=lambda p: validate_plan(p, {"analyst", "writer"}),
+    )  # fmt: skip
+    assert plan.subtasks[0].role == "analyst"
+    feedback = llm.calls[1]["messages"][-1]["content"][0]
+    assert feedback["is_error"] and "unknown role 'analytic-tool'" in feedback["content"]
+    assert "allowed" in feedback["content"]
+
+
+def test_planner_that_invents_a_role_gets_a_second_chance():
+    from agentforge import Orchestrator
+
+    llm = ScriptedLLM([_plan_call("analytic-tool"), _plan_call("analyst")])
+    plan = Orchestrator(llm, ToolRegistry())._plan("task")
+    assert plan.subtasks[0].role == "analyst"
+    assert "ONLY these role names" in llm.calls[0]["system"]
+
+
+def test_a_planner_that_never_fixes_the_plan_fails_cleanly_not_with_a_raw_plan_error():
+    from agentforge import Orchestrator
+
+    llm = ScriptedLLM([_plan_call("nonsense")] * 3)
+    with pytest.raises(LLMError, match="unknown role 'nonsense'"):
+        Orchestrator(llm, ToolRegistry()).run("task")
+
+
+def test_eval_session_records_a_bad_plan_as_a_failed_run():
+    from agentforge.orchestrator import PlanError
+
+    root = Path(__file__).parent.parent
+    spec = importlib.util.spec_from_file_location("run_evals3", root / "evals" / "run_evals.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    def bad_plan(case, llm):
+        raise PlanError("dependency cycle detected")
+
+    mod.run_case = bad_plan
+    row = mod.safe_run({"name": "x", "task": "t", "checks": {}}, object())
+    assert row["passed"] is False and "cycle" in row["failures"][0]

@@ -120,7 +120,8 @@ PLANNER_SYSTEM = (
     "You are a planning agent. Decompose the user's task into the FEWEST subtasks that "
     "solve it (often 1-4). Make subtasks independent where possible so they can run in "
     "parallel; use depends_on only when a task truly needs another's output. Each goal must be "
-    "self-contained. Available worker roles:\n{roles}"
+    "self-contained. Use ONLY these role names, exactly as written. "
+    "Available worker roles:\n{roles}"
 )
 SYNTH_SYSTEM = (
     "You are the SYNTHESIZER. Combine the workers' results into one accurate, well-organised "
@@ -208,6 +209,7 @@ class Orchestrator:
             tool_description="Submit the task decomposition.",
             model_cls=Plan,
             on_usage=self._record,
+            validate=lambda plan: validate_plan(plan, set(self.workers)),
         )
         return plan
 

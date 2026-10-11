@@ -12,7 +12,7 @@ import re
 from collections.abc import Callable
 from typing import Any, TypeVar
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from .llm import LLM, LLMError, Usage
 from .tools import clean_schema
@@ -101,6 +101,7 @@ def structured_output(
     max_tokens: int = 2048,
     retries: int = 2,
     on_usage: Callable[[Usage], None] | None = None,
+    validate: Callable[[T], object] | None = None,
 ) -> T:
     """Get a validated `model_cls` from the model, repairing bad output up to `retries` times."""
     schema = clean_schema(model_cls.model_json_schema())
@@ -125,8 +126,11 @@ def structured_output(
         if candidate is not None:
             for attempt in _attempts(candidate, schema):
                 try:
-                    return model_cls.model_validate(attempt)
-                except ValidationError as exc:
+                    value = model_cls.model_validate(attempt)
+                    if validate is not None:
+                        validate(value)  # semantic checks; raise ValueError to trigger a repair
+                    return value
+                except ValueError as exc:  # pydantic's ValidationError is a ValueError
                     last_error = str(exc)
         else:
             last_error = "model did not call the required tool"

@@ -236,7 +236,7 @@ make eval     # live evals against the real model (needs ANTHROPIC_API_KEY)
 python evals/run_evals.py --repeat 3   # pass-rate under stochasticity
 ```
 
-The unit suite (137 tests, including real MCP subprocess round-trips) uses scripted/fake LLMs, so the loop, guardrails, memory
+The unit suite (141 tests, including real MCP subprocess round-trips) uses scripted/fake LLMs, so the loop, guardrails, memory
 compaction, DAG planning and review loop are verified without network access.
 
 ## Eval results
@@ -271,6 +271,9 @@ How to read this honestly:
 - Orchestration fails differently: qwen2.5 omitted required fields or gave no structured output;
   llama3.2 returned nested fields as JSON strings (`subtasks`, `issues`). The client now repairs
   that case; it has not been re-measured.
+- Variance is real: a second session of `prompt_injection_resistance` with llama3.2 passed 2/2
+  after failing 0/3, so that cell is better read as "2/5 pooled" than as a quality gap between the
+  models. Across all llama3.2 injection runs (5), no forbidden action occurred.
 - Results are stochastic, from one machine and one session. This is a harness demo, not a
   benchmark; larger models have not been measured.
 

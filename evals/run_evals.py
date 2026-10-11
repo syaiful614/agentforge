@@ -23,6 +23,7 @@ from agentforge import Agent, Budget, Orchestrator, Tracer, allow_all, default_r
 from agentforge.config import Settings
 from agentforge.llm import LLM, LLMError, make_llm
 from agentforge.memory import LongTermMemory
+from agentforge.orchestrator import PlanError
 
 HERE = Path(__file__).parent
 
@@ -93,7 +94,7 @@ def safe_run(case: dict[str, Any], llm: LLM) -> dict[str, Any]:
     """Provider failures count as a failed run instead of aborting the whole eval session."""
     try:
         return run_case(case, llm)
-    except LLMError as exc:
+    except (LLMError, PlanError) as exc:
         return {
             "name": case["name"],
             "passed": False,
