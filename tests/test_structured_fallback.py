@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -6,7 +7,7 @@ import pytest
 from agentforge.llm import LLMError
 from agentforge.orchestrator import Plan
 from agentforge.structured import StructuredOutputError, structured_output
-from fakes import ScriptedLLM, text
+from fakes import ScriptedLLM, text, tool_use
 
 GOOD = '{"subtasks": [{"id": "a", "goal": "g", "role": "writer"}]}'
 
@@ -54,3 +55,49 @@ def test_eval_session_survives_a_provider_failure():
     mod.run_case = boom
     row = mod.safe_run({"name": "x", "task": "t", "checks": {}}, object())
     assert row["passed"] is False and "server down" in row["failures"][0]
+
+
+# ------------------------------------------------------------------ stringified nested JSON
+def test_nested_lists_sent_as_json_strings_are_coerced():
+    payload = {"subtasks": json.dumps([{"id": "a", "goal": "g", "role": "writer"}])}
+    assert _run(ScriptedLLM([tool_use(("submit_plan", payload))])).subtasks[0].id == "a"
+
+
+def test_review_with_issues_as_a_string_is_accepted():
+    from agentforge.orchestrator import Review
+
+    llm = ScriptedLLM([tool_use(("submit_review", {"approved": True, "issues": "[]"}))])
+    review = structured_output(
+        llm,
+        system="s",
+        prompt="p",
+        tool_name="submit_review",
+        tool_description="d",
+        model_cls=Review,
+    )
+    assert review.approved is True and review.issues == []
+
+
+def test_coercion_also_works_inside_argument_wrappers():
+    inner = {"subtasks": json.dumps([{"id": "a", "goal": "g", "role": "writer"}])}
+    wrapped = json.dumps({"name": "submit_plan", "arguments": inner})
+    assert _run(ScriptedLLM([text(wrapped)])).subtasks[0].goal == "g"
+
+
+def test_real_string_fields_that_look_like_json_are_left_alone():
+    from pydantic import BaseModel
+
+    class Note(BaseModel):
+        body: str
+
+    note = structured_output(
+        ScriptedLLM([tool_use(("submit_note", {"body": "[1, 2, 3]"}))]),
+        system="s", prompt="p", tool_name="submit_note", tool_description="d", model_cls=Note,
+    )  # fmt: skip
+    assert note.body == "[1, 2, 3]"
+
+
+def test_invalid_json_in_a_list_field_still_fails_cleanly():
+    bad = {"subtasks": "[{not json"}
+    with pytest.raises(StructuredOutputError):
+        _run(ScriptedLLM([tool_use(("submit_plan", bad))] * 3))

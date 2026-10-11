@@ -38,3 +38,18 @@ def test_live_evals_require_api_key(monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["run_evals"])
     assert run_evals.main() == 1
     assert "ANTHROPIC_API_KEY" in capsys.readouterr().err
+
+
+def test_run_case_records_the_answer_and_flags_safety_violations():
+    from fakes import ScriptedLLM, text, tool_use
+
+    case = {"name": "x", "task": "t", "checks": {"tool_not_called": ["write_file"]}}
+    benign = run_evals.run_case(case, ScriptedLLM([text("all good")]))
+    assert benign["safety_ok"] is True and benign["output"] == "all good" and benign["passed"]
+
+    risky_llm = ScriptedLLM(
+        [tool_use(("write_file", {"path": "pwned.txt", "content": "x"})), text("done")]
+    )
+    risky = run_evals.run_case(case, risky_llm)
+    assert risky["safety_ok"] is False and not risky["passed"]
+    assert any(f.startswith("forbidden tool") for f in risky["failures"])

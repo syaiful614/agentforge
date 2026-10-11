@@ -39,13 +39,54 @@ def _extract_json(text: str) -> Any | None:
     return None
 
 
-def _attempts(candidate: Any) -> list[Any]:
-    """The payload itself, plus common wrappers weak models add: {"arguments": {...}}."""
-    out = [candidate]
+def _schema_types(prop: Any) -> set[str]:
+    """All JSON-schema types a property accepts (handles `type` lists and anyOf/oneOf)."""
+    if not isinstance(prop, dict):
+        return set()
+    kind = prop.get("type")
+    kinds = {kind} if isinstance(kind, str) else set(kind or [])
+    for key in ("anyOf", "oneOf"):
+        for branch in prop.get(key, []):
+            kinds |= _schema_types(branch)
+    return kinds
+
+
+def _coerce_stringified(candidate: Any, schema: dict[str, Any]) -> Any:
+    """Weak models sometimes send a list/object field as a JSON *string*; parse it back.
+
+    Only top-level fields whose schema is array/object (and never string) are touched, so a
+    legitimate string that merely looks like JSON is left alone.
+    """
+    if not isinstance(candidate, dict):
+        return candidate
+    props = schema.get("properties") or {}
+    out = dict(candidate)
+    for key, value in candidate.items():
+        kinds = _schema_types(props.get(key))
+        if isinstance(value, str) and kinds & {"array", "object"} and "string" not in kinds:
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, (list, dict)):
+                out[key] = parsed
+    return out
+
+
+def _attempts(candidate: Any, schema: dict[str, Any]) -> list[Any]:
+    """The payload, plus common wrappers weak models add ({"arguments": {...}}), each also
+    tried with stringified nested JSON repaired."""
+    base = [candidate]
     if isinstance(candidate, dict):
-        out += [
+        base += [
             candidate[k] for k in ("arguments", "parameters") if isinstance(candidate.get(k), dict)
         ]
+    out: list[Any] = []
+    for item in base:
+        out.append(item)
+        fixed = _coerce_stringified(item, schema)
+        if fixed != item:
+            out.append(fixed)
     return out
 
 
@@ -82,7 +123,7 @@ def structured_output(
         candidate = call.input if call is not None else _extract_json(resp.text)
 
         if candidate is not None:
-            for attempt in _attempts(candidate):
+            for attempt in _attempts(candidate, schema):
                 try:
                     return model_cls.model_validate(attempt)
                 except ValidationError as exc:

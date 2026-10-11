@@ -69,6 +69,10 @@ from existing evidence rather than re-running workers, which bounds cost.
 `structured_output()` forces a tool call whose schema is a pydantic model, validates, and on
 failure feeds the validation error back (as a proper `tool_result`) for up to N retries.
 
+Weak models are tolerated, not trusted: JSON in plain text is accepted, `{"arguments": {...}}`
+wrappers are unwrapped, and array/object fields sent as JSON *strings* are parsed back (string
+fields are never touched). Everything is still validated against the pydantic model.
+
 ### 7. MCP: external tools without trusting the server
 The MCP client speaks JSON-RPC over stdio from the spec (no SDK). A reader thread routes
 responses to waiting callers by request id, so concurrent read-only tool calls share one
