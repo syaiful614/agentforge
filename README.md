@@ -99,7 +99,7 @@ suite (which uses the bundled demo server over a real subprocess instead).
 
 ```bash
 agentforge mcp-tools mcp-files.json
-agentforge run "Read C:\\Users\\you\\Documents\\notes\\ide.txt and tell me what it says" \
+agentforge run "Read C:\Users\you\Documents\notes\ide.txt and tell me what it says" \
   --provider openai --model qwen2.5:3b --mcp-config mcp-files.json
 ```
 
