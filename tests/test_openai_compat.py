@@ -148,3 +148,33 @@ def test_cli_prints_friendly_error_instead_of_traceback(monkeypatch, tmp_path, c
     monkeypatch.setattr(cli, "make_llm", explode)
     code = cli.main(["run", "x", "--workspace", str(tmp_path)])
     assert code == 1 and "error: Anthropic account has no credit." in capsys.readouterr().err
+
+
+def test_timeouts_become_friendly_errors_and_are_not_retried(monkeypatch):
+    llm = OpenAICompatLLM("m", base_url="http://x/v1", timeout=7, max_retries=3)
+    calls = {"n": 0}
+
+    def slow(req, timeout):
+        calls["n"] += 1
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr("urllib.request.urlopen", slow)
+    with pytest.raises(LLMError, match="within 7s.*AGENTFORGE_TIMEOUT"):
+        llm.generate(system="s", messages=[{"role": "user", "content": "x"}])
+    assert calls["n"] == 1  # a timeout is expensive; never retry it blindly
+
+    def connect_timeout(req, timeout):
+        raise urllib.error.URLError(TimeoutError("connect timed out"))
+
+    monkeypatch.setattr("urllib.request.urlopen", connect_timeout)
+    with pytest.raises(LLMError, match="no response"):
+        llm.generate(system="s", messages=[{"role": "user", "content": "x"}])
+
+
+def test_timeout_setting_flows_into_factory(monkeypatch):
+    from agentforge.config import Settings
+
+    monkeypatch.setenv("AGENTFORGE_TIMEOUT", "600")
+    assert Settings.from_env().timeout_s == 600.0
+    llm = make_llm("openai", "m", timeout=600)
+    assert llm.timeout == 600  # type: ignore[attr-defined]

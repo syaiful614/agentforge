@@ -107,6 +107,7 @@ def main() -> int:
             args.model or s.model,
             api_key=s.key_for(provider),
             base_url=args.base_url or s.base_url,
+            timeout=s.timeout_s,
         )
     except LLMError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -130,6 +131,7 @@ def main() -> int:
         avg_tok = sum(r["tokens"] for r in runs) // len(runs)
         print(f"[{mark}] {case['name']:<36} {passed}/{len(runs)}  ~{avg_tok} tokens")
         for r in runs:
+            print(f"       tools used: {r['tools'] or 'none'} | steps: {r['steps']}")
             for f in r["failures"]:
                 print(f"       - {f}")
 

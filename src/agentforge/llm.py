@@ -207,6 +207,12 @@ class OpenAICompatLLM:
         self.timeout = timeout
         self.max_retries = max_retries
 
+    def _timeout_error(self, url: str) -> LLMError:
+        return LLMError(
+            f"no response from {url} within {self.timeout:.0f}s. Local models on CPU can be slow: "
+            "raise AGENTFORGE_TIMEOUT (seconds) or use a smaller/faster model."
+        )
+
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
         url = f"{self.base_url}/chat/completions"
         headers = {"Content-Type": "application/json"}
@@ -227,10 +233,14 @@ class OpenAICompatLLM:
                 hint = " (invalid API key?)" if exc.code in (401, 403) else ""
                 raise LLMError(f"{self.base_url} returned HTTP {exc.code}{hint}: {body}") from exc
             except urllib.error.URLError as exc:
+                if isinstance(exc.reason, TimeoutError):
+                    raise self._timeout_error(url) from exc
                 if attempt < self.max_retries:
                     time.sleep(2**attempt)
                     continue
                 raise LLMError(f"cannot reach {url}: {exc.reason}. Is the server running?") from exc
+            except TimeoutError as exc:  # raised while waiting for the response body
+                raise self._timeout_error(url) from exc
         raise LLMError("unreachable")  # pragma: no cover
 
     def generate(
@@ -296,6 +306,7 @@ def make_llm(
     *,
     api_key: str | None = None,
     base_url: str | None = None,
+    timeout: float | None = None,
 ) -> LLM:
     """Factory: provider is 'anthropic' or 'openai' (any OpenAI-compatible endpoint)."""
     if provider == "anthropic":
@@ -303,5 +314,10 @@ def make_llm(
     if provider == "openai":
         if model.startswith("claude"):
             raise LLMError("Set --model (or AGENTFORGE_MODEL) to a model your provider serves.")
-        return OpenAICompatLLM(model, base_url or "http://localhost:11434/v1", api_key)
+        return OpenAICompatLLM(
+            model,
+            base_url or "http://localhost:11434/v1",
+            api_key,
+            timeout=timeout or 120.0,
+        )
     raise LLMError(f"unknown provider '{provider}' (use 'anthropic' or 'openai')")

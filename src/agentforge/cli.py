@@ -36,6 +36,7 @@ def _build(
         args.model or s.model,
         api_key=s.key_for(provider),
         base_url=args.base_url or s.base_url,
+        timeout=s.timeout_s,
     )
     return llm, tools, tracer, approval, budget
 
