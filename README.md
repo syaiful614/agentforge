@@ -185,6 +185,9 @@ Design notes:
 - Verified by a test that runs a real HTTP server and proves the first chunk reaches `on_text`
   *before* the server sends the rest. The Anthropic path uses the SDK's `messages.stream` and is
   covered with a fake SDK only.
+  Also checked manually on Windows 11 against Ollama (`qwen2.5:3b`, CPU only): the first text
+  arrived after 3.9 s and the reply finished after 8.5 s, delivered in 38 chunks (single run,
+  October 2026; the first interval includes prompt processing).
 
 ## Use as a library
 
