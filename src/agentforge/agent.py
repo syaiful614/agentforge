@@ -66,6 +66,7 @@ class Agent:
         max_tokens: int = 4096,
         max_parallel_tools: int = 4,
         loop_threshold: int = 3,
+        trace_outputs: str = "errors",
     ) -> None:
         self.llm = llm
         self.tools = tools
@@ -77,6 +78,9 @@ class Agent:
         self.memory = memory or ConversationMemory()
         self.max_tokens = max_tokens
         self.max_parallel_tools = max_parallel_tools
+        if trace_outputs not in ("none", "errors", "all"):
+            raise ValueError("trace_outputs must be 'none', 'errors' or 'all'")
+        self.trace_outputs = trace_outputs  # outputs can contain private data: errors-only default
         self._loops = LoopDetector(loop_threshold)
 
     # ------------------------------------------------------------------ public
@@ -185,4 +189,6 @@ class Agent:
         with self.tracer.span("tool_call", tool=call.name, input=call.input) as info:
             result = tool.run(call.input)
             info.update(is_error=result.is_error, output_chars=len(result.content))
+            if self.trace_outputs == "all" or (self.trace_outputs == "errors" and result.is_error):
+                info["output_preview"] = result.content[:300]
         return self._result_block(call, result.content, result.is_error)

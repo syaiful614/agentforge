@@ -319,9 +319,30 @@ def _safe_name(server: str, tool: str) -> str:
     return _NAME_BAD.sub("_", f"{server}__{tool}")[:64]  # provider tool-name limits
 
 
-def _make_caller(client: MCPClient, tool_name: str) -> Any:
+def _allows_null(prop: Any) -> bool:
+    """Does this JSON-schema property explicitly accept null?"""
+    if not isinstance(prop, dict):
+        return False
+    kind = prop.get("type")
+    if kind == "null" or (isinstance(kind, list) and "null" in kind):
+        return True
+    return any(_allows_null(b) for key in ("anyOf", "oneOf") for b in prop.get(key, []))
+
+
+def prune_null_args(args: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
+    """Drop `null` values for properties that don't accept null.
+
+    Small models often fill every optional parameter, sending null for the ones they don't
+    need; strict servers reject that (e.g. "expected number, received null"). Omitting the key
+    is what the model meant.
+    """
+    props = schema.get("properties") or {}
+    return {k: v for k, v in args.items() if v is not None or _allows_null(props.get(k))}
+
+
+def _make_caller(client: MCPClient, tool_name: str, schema: dict[str, Any]) -> Any:
     def call(args: dict[str, Any]) -> str:
-        text, is_error = client.call_tool(tool_name, args)
+        text, is_error = client.call_tool(tool_name, prune_null_args(args, schema))
         if is_error:
             raise ToolError(text)
         return text
@@ -367,7 +388,7 @@ def mcp_tools(
                 name=name,
                 description=f"[MCP server: {client.name}] {description}",
                 input_schema=schema,
-                fn=_make_caller(client, orig),
+                fn=_make_caller(client, orig, schema),
                 model=None,
                 read_only=read_only,
                 requires_approval=not read_only,

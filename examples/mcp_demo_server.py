@@ -22,11 +22,18 @@ PROTOCOL = "2025-06-18"
 NOTES: list[str] = []
 
 
-def _tool(name: str, description: str, props: dict[str, Any], read_only: bool) -> dict[str, Any]:
+def _tool(
+    name: str,
+    description: str,
+    props: dict[str, Any],
+    read_only: bool,
+    required: list[str] | None = None,
+) -> dict[str, Any]:
+    required = list(props) if required is None else required
     return {
         "name": name,
         "description": description,
-        "inputSchema": {"type": "object", "properties": props, "required": list(props)},
+        "inputSchema": {"type": "object", "properties": props, "required": required},
         "annotations": {"readOnlyHint": read_only},
     }
 
@@ -36,6 +43,13 @@ TOOLS = [
     _tool("word_stats", "Count words, characters and unique words in a text.", TEXT, True),
     _tool("slugify", "Turn a title into a URL slug.", TEXT, True),
     _tool("add_note", "Save a note in server memory (a write operation).", TEXT, False),
+    _tool(
+        "truncate_text",
+        "Cut a text to at most max_chars characters (max_chars is optional).",
+        {"text": {"type": "string"}, "max_chars": {"type": "number"}},
+        True,
+        required=["text"],
+    ),
     _tool("list_notes", "List saved notes.", {}, True),
     _tool("fail", "Always fails; shows error handling.", {"message": {"type": "string"}}, True),
 ]
@@ -54,6 +68,12 @@ def call(name: str, args: dict[str, Any]) -> str:
         return f"words={len(words)} chars={len(text)} unique={len({w.lower() for w in words})}"
     if name == "slugify":
         return re.sub(r"[^a-z0-9]+", "-", str(args["text"]).lower()).strip("-")
+    if name == "truncate_text":
+        limit = args.get("max_chars", len(str(args["text"])))
+        if isinstance(limit, bool) or not isinstance(limit, (int, float)):
+            # strict like a zod/JSON-schema validator: null is not a number
+            raise ValueError(f"max_chars: expected number, received {type(limit).__name__}")
+        return str(args["text"])[: int(limit)]
     if name == "add_note":
         NOTES.append(str(args["text"]))
         return f"saved note #{len(NOTES)}"

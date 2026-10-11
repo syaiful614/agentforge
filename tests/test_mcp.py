@@ -271,3 +271,63 @@ def test_cli_run_exposes_mcp_tools_to_the_agent(tmp_path, monkeypatch, capsys):
     code = cli.main(["run", "x", "--workspace", str(tmp_path / "ws"), "--mcp-config", str(cfg)])
     assert code == 0 and capsys.readouterr().out.strip() == "slug ok"
     assert "hello-world" in _tool_output(llm)
+
+
+# ------------------------------------------------------------------ null-argument pruning
+def test_null_optional_args_are_dropped_so_strict_servers_accept_them(client):
+    # Reproduces what a small model does: fill every optional field, with null for "unused".
+    # The strict demo server rejects null for a number, exactly like a schema validator would.
+    out, is_error = client.call_tool("truncate_text", {"text": "hello world", "max_chars": None})
+    assert is_error and "received NoneType" in out
+
+    tools = {t.name: t for t in mcp_tools(client)}
+    fixed = tools["demo__truncate_text"].run({"text": "hello world", "max_chars": None})
+    assert not fixed.is_error and fixed.content == "hello world"
+    kept = tools["demo__truncate_text"].run({"text": "hello world", "max_chars": 5})
+    assert kept.content == "hello"
+
+
+def test_prune_keeps_nulls_the_schema_allows():
+    from agentforge.mcp_client import prune_null_args
+
+    schema = {
+        "properties": {
+            "a": {"type": ["string", "null"]},
+            "b": {"anyOf": [{"type": "number"}, {"type": "null"}]},
+            "c": {"type": "number"},
+        }
+    }
+    out = prune_null_args({"a": None, "b": None, "c": None, "unknown": None, "ok": 1}, schema)
+    assert out == {"a": None, "b": None, "ok": 1}
+
+
+# ------------------------------------------------------------------ trace shows tool errors
+def _traced_run(client, trace_outputs, calls):
+    from agentforge import Tracer
+
+    tracer = Tracer()
+    llm = ScriptedLLM([tool_use(*calls), text("done")])
+    agent = Agent(llm, ToolRegistry(mcp_tools(client)), tracer=tracer, trace_outputs=trace_outputs)
+    agent.run("x")
+    return [e for e in tracer.events if e["type"] == "tool_call"]
+
+
+def test_trace_records_error_text_by_default_but_not_successful_output(client):
+    events = _traced_run(
+        client,
+        "errors",
+        [("demo__fail", {"message": "kaput"}), ("demo__slugify", {"text": "Secret Title"})],
+    )
+    by_tool = {e["tool"]: e for e in events}
+    assert "kaput" in by_tool["demo__fail"]["output_preview"]
+    assert "output_preview" not in by_tool["demo__slugify"]
+
+
+def test_trace_output_modes(client):
+    call = [("demo__slugify", {"text": "Secret Title"})]
+    assert "secret-title" in _traced_run(client, "all", call)[0]["output_preview"]
+    assert (
+        "output_preview" not in _traced_run(client, "none", [("demo__fail", {"message": "m"})])[0]
+    )
+    with pytest.raises(ValueError, match="trace_outputs"):
+        Agent(ScriptedLLM([]), ToolRegistry(), trace_outputs="everything")
