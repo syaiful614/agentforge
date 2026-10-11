@@ -64,7 +64,7 @@ def test_llm_response_helpers():
 @pytest.fixture
 def fake_runtime(monkeypatch, tmp_path):
     llm = ScriptedLLM([tool_use(("calculator", {"expression": "6*7"})), text("42")])
-    monkeypatch.setattr(cli, "AnthropicLLM", lambda *a, **k: llm)
+    monkeypatch.setattr(cli, "make_llm", lambda *a, **k: llm)
     monkeypatch.setenv("AGENTFORGE_TRACE_DIR", str(tmp_path / "traces"))
     return llm
 

@@ -11,7 +11,7 @@ from .agent import Agent
 from .builtin_tools import default_registry
 from .config import Settings
 from .guardrails import ApprovalPolicy, Budget, allow_all, cli_prompt
-from .llm import AnthropicLLM
+from .llm import LLM, LLMError, make_llm
 from .memory import LongTermMemory
 from .orchestrator import Orchestrator
 from .tools import ToolRegistry
@@ -20,7 +20,7 @@ from .tracing import Tracer
 
 def _build(
     args: argparse.Namespace,
-) -> tuple[AnthropicLLM, ToolRegistry, Tracer, ApprovalPolicy, Budget]:
+) -> tuple[LLM, ToolRegistry, Tracer, ApprovalPolicy, Budget]:
     s = Settings.from_env()
     workspace = Path(args.workspace or s.workspace)
     workspace.mkdir(parents=True, exist_ok=True)
@@ -30,7 +30,13 @@ def _build(
     tracer = Tracer(Path(args.trace) if args.trace else s.trace_dir / "latest.jsonl")
     approval = allow_all if args.yes else cli_prompt
     budget = Budget(max_steps=args.max_steps, max_tokens=args.max_tokens)
-    llm = AnthropicLLM(args.model or s.model, api_key=s.api_key)
+    provider = args.provider or s.provider
+    llm = make_llm(
+        provider,
+        args.model or s.model,
+        api_key=s.key_for(provider),
+        base_url=args.base_url or s.base_url,
+    )
     return llm, tools, tracer, approval, budget
 
 
@@ -95,6 +101,10 @@ def _cmd_tools(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--model")
+    common.add_argument("--provider", choices=["anthropic", "openai"], help="LLM backend")
+    common.add_argument(
+        "--base-url", help="OpenAI-compatible endpoint, e.g. http://localhost:11434/v1"
+    )
     common.add_argument("--workspace", help="Directory the file tools are confined to")
     common.add_argument("--trace", help="JSONL trace output path")
     common.add_argument("--max-steps", type=int, default=15)
@@ -118,7 +128,11 @@ def main(argv: list[str] | None = None) -> int:
     t.set_defaults(fn=_cmd_tools)
 
     args = p.parse_args(argv)
-    return int(args.fn(args))
+    try:
+        return int(args.fn(args))
+    except LLMError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

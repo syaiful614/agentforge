@@ -10,7 +10,16 @@ from .guardrails import (
     deny_all,
     read_only_only,
 )
-from .llm import LLM, AnthropicLLM, LLMResponse, ToolCall, Usage
+from .llm import (
+    LLM,
+    AnthropicLLM,
+    LLMError,
+    LLMResponse,
+    OpenAICompatLLM,
+    ToolCall,
+    Usage,
+    make_llm,
+)
 from .memory import ConversationMemory, LongTermMemory
 from .orchestrator import Orchestrator, OrchestratorResult, Plan, WorkerSpec
 from .structured import structured_output
@@ -27,9 +36,11 @@ __all__ = [
     "Budget",
     "BudgetExceeded",
     "ConversationMemory",
+    "LLMError",
     "LLMResponse",
     "LongTermMemory",
     "Orchestrator",
+    "OpenAICompatLLM",
     "OrchestratorResult",
     "Plan",
     "Tool",
@@ -43,6 +54,7 @@ __all__ = [
     "default_registry",
     "deny_all",
     "make_file_tools",
+    "make_llm",
     "make_memory_tools",
     "read_only_only",
     "structured_output",

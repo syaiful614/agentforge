@@ -34,6 +34,7 @@ def test_cases_file_is_well_formed_and_fixtures_exist():
 
 def test_live_evals_require_api_key(monkeypatch, capsys):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("AGENTFORGE_PROVIDER", raising=False)
     monkeypatch.setattr("sys.argv", ["run_evals"])
     assert run_evals.main() == 1
     assert "ANTHROPIC_API_KEY" in capsys.readouterr().err

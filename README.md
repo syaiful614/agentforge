@@ -1,10 +1,10 @@
-﻿# AgentForge
+# AgentForge
 
-[![CI](https://github.com/MuhammadSyaiful16/agentforge/actions/workflows/ci.yml/badge.svg)](https://github.com/MuhammadSyaiful16/agentforge/actions)
+[![CI](https://github.com/YOUR_USERNAME/agentforge/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_USERNAME/agentforge/actions)
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
-**A production-minded agent framework built from first principles â€” no LangChain, ~1,000 lines.**
+**A production-minded agent framework built from first principles — no LangChain, ~1,000 lines.**
 Tool use, memory, guardrails, tracing, multi-agent orchestration and an eval harness,
 designed to show *how agents actually work* and *what it takes to run them safely*.
 
@@ -20,7 +20,7 @@ AgentForge treats those as first-class design problems.
 |---|---|
 | **Agent loop** | Native tool use, parallel read-only tool calls, step/token/time budgets |
 | **Typed tools** | `@tool` derives JSON schema from type hints, validates args, returns errors to the model |
-| **Multi-agent** | Planner â†’ DAG of parallel workers â†’ synthesizer â†’ critic (reflection loop) |
+| **Multi-agent** | Planner → DAG of parallel workers → synthesizer → critic (reflection loop) |
 | **Structured output** | Forced tool call + pydantic validation + self-repair retries |
 | **Memory** | Context compaction (never splits tool pairs) + persistent SQLite long-term memory |
 | **Safety** | Default-deny approvals, loop detection, injection-resistant tool output, sandboxed file tools, AST-safe calculator |
@@ -32,7 +32,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design decisions and th
 ## Quickstart
 
 ```bash
-git clone https://github.com/MuhammadSyaiful16/agentforge && cd agentforge
+git clone https://github.com/YOUR_USERNAME/agentforge && cd agentforge
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 cp .env.example .env && export ANTHROPIC_API_KEY=sk-ant-...
@@ -45,6 +45,29 @@ agentforge chat                                   # interactive, with memory
 ```
 
 Risky tools (`write_file`) prompt for approval on the terminal; pass `-y` to auto-approve.
+
+## Providers (including free ones)
+
+AgentForge talks to models through a tiny `LLM` protocol with two adapters:
+`anthropic` (default) and `openai` (any OpenAI-compatible `/chat/completions` endpoint).
+The model must support **tool calling**.
+
+```bash
+# Free + local: Ollama (https://ollama.com). Pick a tool-calling model from its library.
+ollama pull <tool-calling-model>
+agentforge run "What is 17*23?" --provider openai --model <tool-calling-model>
+# defaults to http://localhost:11434/v1
+
+# Hosted free tiers (e.g. Groq, Gemini, OpenRouter): use their OpenAI-compatible URL + key
+export AGENTFORGE_PROVIDER=openai
+export AGENTFORGE_BASE_URL=<provider openai-compatible url>
+export AGENTFORGE_API_KEY=<your key>
+export AGENTFORGE_MODEL=<model name>
+python evals/run_evals.py
+```
+
+Free-tier limits and model names change often; check your provider's docs. Smaller models
+may fail some eval cases (that is exactly what the eval harness is for).
 
 ## Use as a library
 
@@ -111,7 +134,7 @@ tests/              offline test-suite with fake LLMs
 ```
 
 ## Roadmap
-Streaming Â· MCP client Â· embedding-based memory Â· USD cost budgets Â· container sandbox for code tools.
+Streaming · MCP client · embedding-based memory · USD cost budgets · container sandbox for code tools.
 
 ## License
 MIT

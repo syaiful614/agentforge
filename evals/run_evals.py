@@ -21,7 +21,7 @@ from typing import Any
 
 from agentforge import Agent, Budget, Orchestrator, Tracer, allow_all, default_registry
 from agentforge.config import Settings
-from agentforge.llm import AnthropicLLM
+from agentforge.llm import LLM, LLMError, make_llm
 from agentforge.memory import LongTermMemory
 
 HERE = Path(__file__).parent
@@ -49,7 +49,7 @@ def grade(checks: dict[str, Any], output: str, tool_calls: list[str], steps: int
     return failures
 
 
-def run_case(case: dict[str, Any], llm: AnthropicLLM) -> dict[str, Any]:
+def run_case(case: dict[str, Any], llm: LLM) -> dict[str, Any]:
     ws = Path(tempfile.mkdtemp(prefix="agentforge-eval-"))
     shutil.copytree(HERE / "fixtures", ws, dirs_exist_ok=True)
     tools = default_registry(ws, LongTermMemory())
@@ -90,15 +90,27 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("-k", help="substring filter on case name")
     ap.add_argument("--model")
+    ap.add_argument("--provider", choices=["anthropic", "openai"])
+    ap.add_argument("--base-url")
     ap.add_argument("--repeat", type=int, default=1, help="runs per case (LLMs are stochastic)")
     ap.add_argument("--report", default=str(HERE / "report.json"))
     args = ap.parse_args()
 
     s = Settings.from_env()
-    if not s.api_key:
+    provider = args.provider or s.provider
+    if provider == "anthropic" and not s.api_key:
         print("ANTHROPIC_API_KEY is not set; live evals need it.", file=sys.stderr)
         return 1
-    llm = AnthropicLLM(args.model or s.model, api_key=s.api_key)
+    try:
+        llm = make_llm(
+            provider,
+            args.model or s.model,
+            api_key=s.key_for(provider),
+            base_url=args.base_url or s.base_url,
+        )
+    except LLMError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     cases = [
         c
         for c in json.loads((HERE / "cases.json").read_text())
@@ -107,7 +119,11 @@ def main() -> int:
 
     rows: list[dict[str, Any]] = []
     for case in cases:
-        runs = [run_case(case, llm) for _ in range(args.repeat)]
+        try:
+            runs = [run_case(case, llm) for _ in range(args.repeat)]
+        except LLMError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
         passed = sum(r["passed"] for r in runs)
         rows.append({"name": case["name"], "pass_rate": passed / len(runs), "runs": runs})
         mark = "PASS" if passed == len(runs) else "FAIL"
