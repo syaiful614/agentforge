@@ -6,7 +6,7 @@ LLM agents **safely and measurably**, not just to make a demo loop work.
 | | |
 |---|---|
 | **What** | Agent loop, typed tools, memory, guardrails, tracing, multi-agent orchestration, MCP client, streaming, eval harness |
-| **Size** | ~2,650 lines of source, ~1,800 lines of tests, 141 tests, 93% coverage |
+| **Size** | ~3,050 lines of source, ~2,250 lines of tests, 179 tests, 92% coverage |
 | **Quality gates** | ruff, mypy and pytest on every push; CI green on Python 3.10, 3.11 and 3.12 |
 | **Providers** | Anthropic, plus any OpenAI-compatible endpoint (Ollama, Groq, Gemini, OpenRouter, ...) |
 | **Verified on** | Windows 11, CPU-only laptop with 8 GB RAM, small local models via Ollama |
@@ -53,8 +53,10 @@ flowchart TB
    independent tasks run in parallel; each worker gets only the tools its role needs (MCP write
    tools are never granted to workers).
 6. **MCP written from the spec.** JSON-RPC over stdio with request/response matching, timeouts and
-   cancellation. Servers are treated as untrusted: minimal child environment (no inherited API
-   keys), namespaced tools, approval by default, capped descriptions, allow-lists.
+   cancellation, over stdio or Streamable HTTP. Servers are treated as untrusted: minimal child environment (no inherited API
+   keys), namespaced tools, approval by default, capped descriptions, allow-lists; over HTTP,
+   tokens come from environment variables, plain http is limited to localhost, and redirects are
+   refused.
 7. **Streaming without changing the contract.** One optional `on_text` callback; the adapter still
    returns the complete reply, so budgets, approvals and tracing never learn about streaming.
 8. **Evals grade trajectories, not just answers.** Which tools ran, how many steps, whether a
@@ -112,11 +114,17 @@ arrives early. One test starts a real HTTP server that refuses to send the secon
 client has displayed the first; if the client buffered, the test fails. A manual run against a
 local model showed first text after 3.9 s and completion after 8.5 s, in 38 chunks.
 
+**A security test that must be able to fail.** For the HTTP transport, the redirect guard (never
+replay credentials at another address) is easy to get wrong silently. The test was validated by
+removing the guard on purpose: the HTTP library then followed the redirect and the test failed,
+which proves it protects something rather than passing vacuously.
+
 ## Known limitations
 
-- Orchestration needs a stronger model than 3B-class on CPU; there is no automatic fallback to
-  single-agent mode yet.
-- MCP supports stdio servers and tools only (no HTTP transport, resources or prompts).
+- Orchestration needs a stronger model than 3B-class on CPU. An opt-in fallback runs a single
+  agent when planning fails, but it is reported as degraded and never counted as success.
+- MCP covers tools only (no resources or prompts) and uses static headers for HTTP auth (no OAuth
+  login flow).
 - Long-term memory is keyword-based; embeddings are the obvious upgrade.
 - Anthropic streaming is covered with a fake SDK only; it has not been run against the live API.
 - Tools run in-process; running untrusted code would need a container sandbox.
@@ -124,7 +132,7 @@ local model showed first text after 3.9 s and completion after 8.5 s, in 38 chun
 ## Run it
 
 ```bash
-pip install -e ".[dev]" && make all          # lint, types, 141 tests, no API key needed
+pip install -e ".[dev]" && make all          # lint, types, 179 tests, no API key needed
 agentforge mcp-tools examples/mcp.json       # connect to the bundled MCP demo server
 agentforge run "Count the words in 'hello agent world'" --stream \
   --provider openai --model <ollama-model> --mcp-config examples/mcp.json --mcp-only

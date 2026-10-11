@@ -1,6 +1,6 @@
 # Architecture & Design Decisions
 
-AgentForge is deliberately framework-free: the whole agent runtime is ~2,600 lines you can
+AgentForge is deliberately framework-free: the whole agent runtime is ~3,050 lines you can
 read in a day. This document explains *why* it is shaped the way it is.
 
 ## Component map
@@ -65,6 +65,11 @@ Independent subtasks run in parallel; dependents receive upstream results as con
 failing worker degrades the answer instead of aborting the run. The critic loop re-synthesises
 from existing evidence rather than re-running workers, which bounds cost.
 
+Planning can also degrade on request (`fallback=True`): when no valid plan is produced, one agent
+with the union of the workers' tools answers instead. It is opt-in, only planning failures trigger
+it (provider and budget errors still propagate), and the result is marked `degraded` with a reason
+and a trace event, so evals and callers can count it separately instead of mistaking it for success.
+
 ### 6. Structured output via forced tool calls + self-repair
 `structured_output()` forces a tool call whose schema is a pydantic model, validates, and on
 failure feeds the validation error back (as a proper `tool_result`) for up to N retries.
@@ -84,7 +89,10 @@ connection; a timed-out request is cancelled and its late reply ignored. Servers
 code, so: minimal child environment (no inherited API keys), `<server>__<tool>` namespacing,
 approval required unless the server declares `readOnlyHint` (advisory, off-switch available),
 capped descriptions (tool-poisoning surface), include/exclude allow-lists, and results wrapped
-as untrusted data. `Tool.model=None` marks raw-JSON-schema tools, validated only for required
+as untrusted data. The same security posture applies over HTTP (Streamable HTTP transport): tokens
+come from environment variables referenced as `${NAME}` in header values, plain http is limited to
+localhost, and redirects are refused because the HTTP client would otherwise replay the
+`Authorization` header at the redirect target. `Tool.model=None` marks raw-JSON-schema tools, validated only for required
 fields; the server remains the authority on its own schema.
 
 ### 8. Observability by default
@@ -108,4 +116,5 @@ and the timeout is per read, so a slow-but-alive local model is never cut off.
 - Tools run in-process; untrusted code execution needs a real sandbox (container/gVisor).
 - Streaming covers single-agent runs only; orchestrator workers run in parallel, so their output would interleave.
 - Cost accounting is token-based; add per-model pricing for USD budgets.
-- MCP: HTTP transport, resources/prompts, and `tools/list_changed` refresh (stdio tools only today).
+- MCP: tools only (no resources or prompts), static headers instead of an OAuth login flow, and no
+  `tools/list_changed` refresh.

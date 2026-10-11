@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from .agent import Agent, AgentResult
 from .guardrails import ApprovalPolicy, Budget, BudgetExceeded, read_only_only
 from .llm import LLM, Usage
-from .structured import structured_output
+from .structured import StructuredOutputError, structured_output
 from .tools import ToolRegistry
 from .tracing import Tracer
 
@@ -123,6 +123,10 @@ PLANNER_SYSTEM = (
     "self-contained. Use ONLY these role names, exactly as written. "
     "Available worker roles:\n{roles}"
 )
+FALLBACK_SYSTEM = (
+    "You are working alone because task planning failed. Solve the whole task yourself with the "
+    "available tools, use the calculator for any arithmetic, and answer concisely and precisely."
+)
 SYNTH_SYSTEM = (
     "You are the SYNTHESIZER. Combine the workers' results into one accurate, well-organised "
     "final answer to the original task. Resolve conflicts explicitly; never invent facts. "
@@ -142,6 +146,8 @@ class OrchestratorResult:
     review_rounds: int
     tokens: int
     run_id: str
+    degraded: bool = False  # True when planning failed and a single agent answered instead
+    degraded_reason: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -159,6 +165,7 @@ class Orchestrator:
         approval: ApprovalPolicy = read_only_only,
         tracer: Tracer | None = None,
         max_review_rounds: int = 1,
+        fallback: bool = False,
         max_parallel_workers: int = 4,
         on_event: Callable[[str], None] | None = None,
     ) -> None:
@@ -170,13 +177,21 @@ class Orchestrator:
         self.tracer = (tracer or Tracer()).bind(agent="orchestrator")
         self._root_tracer = tracer or self.tracer
         self.max_review_rounds = max_review_rounds
+        self.fallback = fallback  # opt-in: fail loudly unless asked to degrade
         self.max_parallel_workers = max_parallel_workers
         self.on_event = on_event or (lambda _msg: None)
 
     # ------------------------------------------------------------------ pipeline
     def run(self, task: str) -> OrchestratorResult:
-        plan = self._plan(task)
-        layers = validate_plan(plan, set(self.workers))
+        try:
+            plan = self._plan(task)
+            layers = validate_plan(plan, set(self.workers))
+        except (StructuredOutputError, PlanError) as exc:
+            # Only "the planner could not produce a valid plan" degrades. Network, auth and
+            # budget errors would fail the fallback too, so they still propagate.
+            if not self.fallback:
+                raise
+            return self._run_fallback(task, exc)
         self.tracer.event("plan", plan=plan.model_dump())
         self.on_event(f"plan: {len(plan.subtasks)} subtasks in {len(layers)} layer(s)")
 
@@ -191,6 +206,39 @@ class Orchestrator:
         answer, rounds = self._synthesize_with_review(task, plan, results)
         return OrchestratorResult(
             answer, plan, results, rounds, self.budget.used_tokens, self.tracer.run_id
+        )
+
+    def _run_fallback(self, task: str, error: Exception) -> OrchestratorResult:
+        """Planning failed: one agent solves the whole task, clearly marked as degraded.
+
+        It gets the union of the workers' tools (never more), so least privilege still holds.
+        The result carries `degraded=True` and the reason; callers and evals report it
+        separately instead of letting a fallback answer pass as a successful orchestration.
+        """
+        reason = str(error)
+        self.tracer.event("planner_fallback", reason=reason)
+        self.on_event(f"planner failed ({reason[:100]}); falling back to a single agent")
+        names = list(dict.fromkeys(n for spec in self.workers.values() for n in spec.tools))
+        agent = Agent(
+            self.llm,
+            self.tools.subset(names),
+            name="fallback",
+            system_prompt=FALLBACK_SYSTEM,
+            budget=self.budget,
+            approval=self.approval,
+            tracer=self._root_tracer,
+        )
+        result = agent.run(task)
+        plan = Plan(subtasks=[Subtask(id="fallback", goal=task, role="fallback")])
+        return OrchestratorResult(
+            result.output,
+            plan,
+            {"fallback": result},
+            0,
+            self.budget.used_tokens,
+            self.tracer.run_id,
+            degraded=True,
+            degraded_reason=reason,
         )
 
     # ------------------------------------------------------------------ stages

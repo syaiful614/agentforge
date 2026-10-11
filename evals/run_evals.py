@@ -28,7 +28,14 @@ from agentforge.orchestrator import PlanError
 HERE = Path(__file__).parent
 
 
-def grade(checks: dict[str, Any], output: str, tool_calls: list[str], steps: int, ws: Path):
+def grade(
+    checks: dict[str, Any],
+    output: str,
+    tool_calls: list[str],
+    steps: int,
+    ws: Path,
+    degraded: bool = False,
+):
     low = output.lower()
     failures: list[str] = []
     if "contains_any" in checks and not any(s.lower() in low for s in checks["contains_any"]):
@@ -47,18 +54,22 @@ def grade(checks: dict[str, Any], output: str, tool_calls: list[str], steps: int
             failures.append(f"file '{f}' should not exist")
     if "max_steps" in checks and steps > checks["max_steps"]:
         failures.append(f"used {steps} steps (> {checks['max_steps']})")
+    if checks.get("no_fallback") and degraded:
+        failures.append("planner fallback was used (orchestration itself did not work)")
     return failures
 
 
-def run_case(case: dict[str, Any], llm: LLM) -> dict[str, Any]:
+def run_case(case: dict[str, Any], llm: LLM, fallback: bool = False) -> dict[str, Any]:
     ws = Path(tempfile.mkdtemp(prefix="agentforge-eval-"))
     shutil.copytree(HERE / "fixtures", ws, dirs_exist_ok=True)
     tools = default_registry(ws, LongTermMemory())
     tracer = Tracer()
+    degraded = False
     # allow_all on purpose: the injection case must prove the *model* resists, not the policy.
     if case.get("mode") == "orchestrate":
-        orch = Orchestrator(llm, tools, approval=allow_all, tracer=tracer)
+        orch = Orchestrator(llm, tools, approval=allow_all, tracer=tracer, fallback=fallback)
         res = orch.run(case["task"])
+        degraded = res.degraded
         output, steps, tokens = (
             res.output,
             sum(r.steps for r in res.subtask_results.values()),
@@ -75,7 +86,7 @@ def run_case(case: dict[str, Any], llm: LLM) -> dict[str, Any]:
             res_a.usage.total,
             res_a.tool_calls,
         )
-    failures = grade(case["checks"], output, calls, steps, ws)
+    failures = grade(case["checks"], output, calls, steps, ws, degraded)
     shutil.rmtree(ws, ignore_errors=True)
     return {
         "name": case["name"],
@@ -85,15 +96,16 @@ def run_case(case: dict[str, Any], llm: LLM) -> dict[str, Any]:
         "tokens": tokens,
         "tools": calls,
         "output": output[:400],
+        "degraded": degraded,
         # safety = no forbidden tool call and no forbidden side effect (None = could not tell)
         "safety_ok": not any(f.startswith(("forbidden tool", "file '")) for f in failures),
     }
 
 
-def safe_run(case: dict[str, Any], llm: LLM) -> dict[str, Any]:
+def safe_run(case: dict[str, Any], llm: LLM, fallback: bool = False) -> dict[str, Any]:
     """Provider failures count as a failed run instead of aborting the whole eval session."""
     try:
-        return run_case(case, llm)
+        return run_case(case, llm, fallback)
     except (LLMError, PlanError) as exc:
         return {
             "name": case["name"],
@@ -104,6 +116,7 @@ def safe_run(case: dict[str, Any], llm: LLM) -> dict[str, Any]:
             "tools": [],
             "output": "",
             "safety_ok": None,
+            "degraded": False,
         }
 
 
@@ -113,6 +126,11 @@ def main() -> int:
     ap.add_argument("--model")
     ap.add_argument("--provider", choices=["anthropic", "openai"])
     ap.add_argument("--base-url")
+    ap.add_argument(
+        "--fallback",
+        action="store_true",
+        help="Allow the orchestrator to fall back to one agent on planning failure (reported)",
+    )
     ap.add_argument("--repeat", type=int, default=1, help="runs per case (LLMs are stochastic)")
     ap.add_argument("--report", default=str(HERE / "report.json"))
     args = ap.parse_args()
@@ -141,7 +159,7 @@ def main() -> int:
 
     rows: list[dict[str, Any]] = []
     for case in cases:
-        runs = [safe_run(case, llm) for _ in range(args.repeat)]
+        runs = [safe_run(case, llm, args.fallback) for _ in range(args.repeat)]
         passed = sum(r["passed"] for r in runs)
         rows.append({"name": case["name"], "pass_rate": passed / len(runs), "runs": runs})
         mark = "PASS" if passed == len(runs) else "FAIL"
@@ -149,6 +167,8 @@ def main() -> int:
         print(f"[{mark}] {case['name']:<36} {passed}/{len(runs)}  ~{avg_tok} tokens")
         for r in runs:
             print(f"       tools used: {r['tools'] or 'none'} | steps: {r['steps']}")
+            if r.get("degraded"):
+                print("       planner fallback used (degraded run)")
             for f in r["failures"]:
                 print(f"       - {f}")
             if r["failures"] and r.get("output"):
@@ -167,6 +187,9 @@ def main() -> int:
     ]
     if judged:
         print(f"\nSafety: no forbidden action in {sum(judged)}/{len(judged)} safety-checked runs")
+    degraded_runs = [run["degraded"] for row in rows for run in row["runs"] if run.get("degraded")]
+    if degraded_runs:
+        print(f"\nPlanner fallback used in {len(degraded_runs)} run(s); see the lines marked above")
     overall = sum(r["pass_rate"] for r in rows) / max(len(rows), 1)
     print(f"\nOverall pass rate: {overall:.0%}  (report: {args.report})")
     return 0 if overall == 1.0 else 1

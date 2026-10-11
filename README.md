@@ -4,7 +4,7 @@
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
-**A production-minded agent framework built from first principles — no LangChain, ~2,600 lines.**
+**A production-minded agent framework built from first principles — no LangChain, ~3,050 lines.**
 Tool use, memory, guardrails, tracing, multi-agent orchestration and an eval harness,
 designed to show *how agents actually work* and *what it takes to run them safely*.
 
@@ -85,6 +85,41 @@ with MCPToolbox(load_mcp_config("examples/mcp.json")) as box:
     agent = Agent(llm, ToolRegistry(box.tools))
     print(agent.run("Slugify 'Hello World'").output)
 ```
+
+### Remote servers over HTTP
+
+Servers that run elsewhere use the Streamable HTTP transport: give the config a `url` instead of a
+`command`.
+
+```json
+{
+  "mcpServers": {
+    "remote": {
+      "url": "https://mcp.example.com/mcp",
+      "headers": { "Authorization": "Bearer ${MCP_TOKEN}" }
+    }
+  }
+}
+```
+
+Try it end to end with the bundled demo server (no account needed):
+
+```bash
+python examples/mcp_demo_http_server.py --port 8808 --token demo     # terminal 1
+export MCP_TOKEN=demo                                                  # terminal 2
+agentforge mcp-tools examples/mcp-http.json
+```
+
+On PowerShell, set the variable with `$env:MCP_TOKEN="demo"`. Notes:
+
+- `${NAME}` in a header is expanded from your environment, so tokens never live in the file.
+- Plain `http` is accepted only for localhost; anything else must be `https`.
+- **Redirects are refused**, because the HTTP library would otherwise replay your `Authorization`
+  header at whatever address the server names. A test proves this: it fails when the guard is
+  removed.
+- Sessions follow the spec: the session id and negotiated protocol version are sent on every call,
+  and the session is ended with `DELETE` on close. Responses may be plain JSON or event streams.
+- Not supported yet: an OAuth login flow (static headers only), resources and prompts.
 
 ### Verified against a real third-party server
 
@@ -230,6 +265,23 @@ print(res.output)
 print(res.plan.model_dump())
 ```
 
+### Planner fallback
+
+Small models often cannot produce a valid plan. By default that fails loudly. Opt in to degrade
+instead:
+
+```bash
+agentforge run "..." --orchestrate --fallback
+```
+
+If planning still fails after the repair attempts, one agent solves the whole task using the union
+of the workers' tools (never more). The result is marked `degraded`
+(`OrchestratorResult.degraded` and `degraded_reason`), a `planner_fallback` event is written to the
+trace, and the CLI prints a warning. Only planning failures degrade: network, authentication and
+budget errors still propagate. The eval harness reports fallback runs separately, and the
+orchestration case requires `no_fallback`, so a fallback answer can never pass as working
+orchestration.
+
 ## Testing & evals
 
 ```bash
@@ -238,7 +290,7 @@ make eval     # live evals against the real model (needs ANTHROPIC_API_KEY)
 python evals/run_evals.py --repeat 3   # pass-rate under stochasticity
 ```
 
-The unit suite (141 tests, including real MCP subprocess round-trips) uses scripted/fake LLMs, so the loop, guardrails, memory
+The unit suite (179 tests, including real MCP subprocess round-trips) uses scripted/fake LLMs, so the loop, guardrails, memory
 compaction, DAG planning and review loop are verified without network access.
 
 ## Eval results
@@ -301,7 +353,7 @@ tests/              offline test-suite with fake LLMs
 ```
 
 ## Roadmap
-MCP over HTTP + resources/prompts · embedding-based memory · USD cost budgets · container sandbox for code tools.
+MCP OAuth + resources/prompts · embedding-based memory · USD cost budgets · container sandbox for code tools.
 
 ## License
 MIT

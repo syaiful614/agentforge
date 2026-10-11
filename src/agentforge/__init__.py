@@ -21,7 +21,15 @@ from .llm import (
     Usage,
     make_llm,
 )
-from .mcp_client import MCPClient, MCPError, MCPToolbox, load_mcp_config, mcp_tools
+from .mcp_client import (
+    MCPClient,
+    MCPConnection,
+    MCPError,
+    MCPHTTPClient,
+    MCPToolbox,
+    load_mcp_config,
+    mcp_tools,
+)
 from .memory import ConversationMemory, LongTermMemory
 from .orchestrator import Orchestrator, OrchestratorResult, Plan, WorkerSpec
 from .structured import structured_output
@@ -40,7 +48,9 @@ __all__ = [
     "LLMError",
     "LLMResponse",
     "MCPClient",
+    "MCPConnection",
     "MCPError",
+    "MCPHTTPClient",
     "MCPToolbox",
     "LongTermMemory",
     "Orchestrator",

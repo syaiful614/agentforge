@@ -50,7 +50,7 @@ def test_eval_session_survives_a_provider_failure():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
 
-    def boom(case, llm):
+    def boom(case, llm, fallback=False):
         raise LLMError("server down")
 
     mod.run_case = boom
@@ -148,7 +148,7 @@ def test_eval_session_records_a_bad_plan_as_a_failed_run():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
 
-    def bad_plan(case, llm):
+    def bad_plan(case, llm, fallback=False):
         raise PlanError("dependency cycle detected")
 
     mod.run_case = bad_plan

@@ -103,10 +103,17 @@ def _cmd_run(args: argparse.Namespace) -> int:
             budget=budget,
             approval=approval,
             tracer=tracer,
+            fallback=args.fallback,
             on_event=lambda m: print(f"  · {m}", file=sys.stderr),
         )
         orch_res = orch.run(args.task)
         print(orch_res.output)
+        if orch_res.degraded:
+            print(
+                f"\nwarning: planner failed ({orch_res.degraded_reason}); "
+                "answered in single-agent mode (degraded)",
+                file=sys.stderr,
+            )
         print(f"\n[{orch_res.tokens} tokens | run {orch_res.run_id}]", file=sys.stderr)
         return 0 if orch_res.ok else 2
 
@@ -223,6 +230,11 @@ def main(argv: list[str] | None = None) -> int:
     r = sub.add_parser("run", parents=[common], help="Run a single task")
     r.add_argument("task")
     r.add_argument("--orchestrate", action="store_true", help="Use planner/worker/critic mode")
+    r.add_argument(
+        "--fallback",
+        action="store_true",
+        help="With --orchestrate: if planning fails, use one agent (reported as degraded)",
+    )
     r.add_argument("--json", action="store_true")
     r.set_defaults(fn=_cmd_run)
 

@@ -105,15 +105,19 @@ def reply_error(id_: Any, code: int, message: str) -> None:
     send({"jsonrpc": "2.0", "id": id_, "error": {"code": code, "message": message}})
 
 
-def handle_call(id_: Any, params: dict[str, Any]) -> None:
+def execute(params: dict[str, Any]) -> dict[str, Any]:
+    """Run a tools/call request; returns the JSON-RPC `result` or `error` member."""
     try:
         text, is_error = call(params.get("name", ""), params.get("arguments") or {}), False
     except KeyError as exc:
-        reply_error(id_, -32602, f"unknown tool {exc}")
-        return
+        return {"error": {"code": -32602, "message": f"unknown tool {exc}"}}
     except Exception as exc:  # tool failures are results with isError, not protocol errors
         text, is_error = f"{type(exc).__name__}: {exc}", True
-    reply(id_, {"content": [{"type": "text", "text": text}], "isError": is_error})
+    return {"result": {"content": [{"type": "text", "text": text}], "isError": is_error}}
+
+
+def handle_call(id_: Any, params: dict[str, Any]) -> None:
+    send({"jsonrpc": "2.0", "id": id_, **execute(params)})
 
 
 def main() -> None:

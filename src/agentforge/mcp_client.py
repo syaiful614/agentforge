@@ -16,12 +16,16 @@ Security posture (servers are third-party code, treat them as untrusted):
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
 import shutil
 import subprocess
 import threading
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -55,7 +59,43 @@ class _Pending:
         self.error: str | None = None
 
 
-class MCPClient:
+class MCPConnection:
+    """What an agent needs from an MCP server, whatever the transport (stdio or HTTP)."""
+
+    name: str
+    timeout: float
+    server_info: dict[str, Any]
+    protocol_version: str | None
+
+    def _request(
+        self, method: str, params: dict[str, Any] | None = None, timeout: float | None = None
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def close(self) -> None:
+        raise NotImplementedError
+
+    # ------------------------------------------------------------------ MCP operations
+    def list_tools(self) -> list[dict[str, Any]]:
+        tools: list[dict[str, Any]] = []
+        cursor: str | None = None
+        for _ in range(50):  # pagination guard
+            res = self._request("tools/list", {"cursor": cursor} if cursor else {})
+            tools.extend(t for t in res.get("tools", []) if isinstance(t, dict))
+            cursor = res.get("nextCursor")
+            if not cursor:
+                break
+        return tools
+
+    def call_tool(
+        self, name: str, arguments: dict[str, Any], timeout: float | None = None
+    ) -> tuple[str, bool]:
+        """Returns (text, is_error). Protocol-level failures raise MCPError."""
+        res = self._request("tools/call", {"name": name, "arguments": arguments}, timeout)
+        return _content_to_text(res), bool(res.get("isError"))
+
+
+class MCPClient(MCPConnection):
     """One connection to one MCP server (a child process speaking JSON-RPC on stdio).
 
     Thread-safe: requests are matched to responses by id, so the agent can run several
@@ -163,25 +203,6 @@ class MCPClient:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
-
-    # ------------------------------------------------------------------ MCP operations
-    def list_tools(self) -> list[dict[str, Any]]:
-        tools: list[dict[str, Any]] = []
-        cursor: str | None = None
-        for _ in range(50):  # pagination guard
-            res = self._request("tools/list", {"cursor": cursor} if cursor else {})
-            tools.extend(t for t in res.get("tools", []) if isinstance(t, dict))
-            cursor = res.get("nextCursor")
-            if not cursor:
-                break
-        return tools
-
-    def call_tool(
-        self, name: str, arguments: dict[str, Any], timeout: float | None = None
-    ) -> tuple[str, bool]:
-        """Returns (text, is_error). Protocol-level failures raise MCPError."""
-        res = self._request("tools/call", {"name": name, "arguments": arguments}, timeout)
-        return _content_to_text(res), bool(res.get("isError"))
 
     # ------------------------------------------------------------------ transport
     def _send(self, obj: dict[str, Any]) -> None:
@@ -311,6 +332,263 @@ def _content_to_text(result: dict[str, Any]) -> str:
     return "\n".join(parts) or "(empty result)"
 
 
+# --------------------------------------------------------------------------- HTTP transport
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+_ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow redirects: urllib would replay our headers (incl. Authorization) elsewhere."""
+
+    def redirect_request(
+        self, req: Any, fp: Any, code: Any, msg: Any, headers: Any, newurl: Any
+    ) -> None:
+        return None
+
+
+def _expand_env(value: str, where: str) -> str:
+    """Replace ${NAME} with the client's environment variable, so secrets stay out of config."""
+
+    def sub(match: re.Match[str]) -> str:
+        found = os.environ.get(match.group(1))
+        if found is None:
+            raise MCPError(f"{where} references unset environment variable {match.group(1)}")
+        return found
+
+    return _ENV_REF.sub(sub, value)
+
+
+class MCPHTTPClient(MCPConnection):
+    """MCP over Streamable HTTP: each JSON-RPC message is a POST to one endpoint.
+
+    The server answers a request with plain JSON or with a server-sent-event stream (which may
+    carry notifications and server requests before the actual response). A session id returned
+    by `initialize` is echoed on every later request, and the negotiated protocol version is sent
+    in `MCP-Protocol-Version`. Every call is its own HTTP request, so calls are naturally
+    concurrent.
+
+    Security: plain http is accepted only for localhost, redirects are refused (credentials must
+    not travel to another host), and header values may reference environment variables as
+    `${NAME}` so tokens never need to be written into a config file.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        timeout: float = 30.0,
+    ) -> None:
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise MCPError(f"MCP server '{name}': url must be http(s)://host/path, got {url!r}")
+        if parts.scheme == "http" and parts.hostname not in _LOOPBACK_HOSTS:
+            raise MCPError(
+                f"MCP server '{name}': refusing plain http to {parts.hostname}; "
+                "use https (plain http is allowed only for localhost)"
+            )
+        self.name = name
+        self.url = url
+        self.timeout = timeout
+        self.server_info = {}
+        self.protocol_version = None
+        self.session_id: str | None = None
+        self._headers: dict[str, str] = {}
+        for key, value in (headers or {}).items():
+            expanded = _expand_env(value, f"MCP server '{name}' header '{key}'")
+            if "\r" in key + expanded or "\n" in key + expanded:
+                raise MCPError(f"MCP server '{name}': header '{key}' contains a line break")
+            self._headers[key] = expanded
+        self._next_id = 0
+        self._id_lock = threading.Lock()
+        self._opener = urllib.request.build_opener(_NoRedirect)
+
+    # ------------------------------------------------------------------ lifecycle
+    def start(self) -> MCPHTTPClient:
+        try:
+            result = self._request(
+                "initialize",
+                {
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {"name": "agentforge", "version": __version__},
+                },
+            )
+            self.server_info = result.get("serverInfo") or {}
+            self.protocol_version = result.get("protocolVersion")
+            self._notify("notifications/initialized")
+        except BaseException:
+            self.close()
+            raise
+        return self
+
+    def close(self) -> None:
+        sid, self.session_id = self.session_id, None
+        if not sid:
+            return
+        headers = {**self._headers, "Mcp-Session-Id": sid}
+        if self.protocol_version:
+            headers["MCP-Protocol-Version"] = self.protocol_version
+        req = urllib.request.Request(self.url, headers=headers, method="DELETE")
+        try:  # ending the session is best-effort; servers may answer 405 or be gone already
+            self._opener.open(req, timeout=5).close()
+        except (OSError, http.client.HTTPException):
+            pass
+
+    def __enter__(self) -> MCPHTTPClient:
+        return self.start()
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    # ------------------------------------------------------------------ transport
+    def _timeout_error(self, wait: float, method: str) -> MCPError:
+        return MCPError(f"MCP server '{self.name}' did not answer '{method}' within {wait:g}s")
+
+    def _http_error(self, exc: urllib.error.HTTPError) -> str:
+        if exc.code in (401, 403):
+            return (
+                f"MCP server '{self.name}' rejected the credentials (HTTP {exc.code}); "
+                "check the 'headers' in your MCP config"
+            )
+        if exc.code == 404 and self.session_id:
+            return f"MCP session with '{self.name}' expired or was closed (HTTP 404); reconnect"
+        if 300 <= exc.code < 400:
+            return (
+                f"MCP server '{self.name}' answered with a redirect (HTTP {exc.code}) to "
+                f"{exc.headers.get('Location')}; refusing to follow it so credentials are not "
+                "sent to another address"
+            )
+        return f"MCP server '{self.name}' returned HTTP {exc.code}: {exc.read().decode(errors='replace')[:300]}"  # noqa: E501
+
+    def _post(self, message: dict[str, Any], wait: float) -> Any:
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            **self._headers,
+        }
+        if self.session_id:
+            headers["Mcp-Session-Id"] = self.session_id
+        if self.protocol_version and message.get("method") != "initialize":
+            headers["MCP-Protocol-Version"] = self.protocol_version
+        req = urllib.request.Request(
+            self.url, data=json.dumps(message).encode(), headers=headers, method="POST"
+        )
+        method = str(message.get("method"))
+        try:
+            return self._opener.open(req, timeout=wait)
+        except urllib.error.HTTPError as exc:
+            raise MCPError(self._http_error(exc)) from exc
+        except urllib.error.URLError as exc:
+            if isinstance(exc.reason, TimeoutError):
+                raise self._timeout_error(wait, method) from exc
+            raise MCPError(
+                f"cannot reach MCP server '{self.name}' at {self.url}: {exc.reason}"
+            ) from exc
+        except TimeoutError as exc:
+            raise self._timeout_error(wait, method) from exc
+
+    def _notify(self, method: str, params: dict[str, Any] | None = None) -> None:
+        message = {"jsonrpc": "2.0", "method": method, "params": params or {}}
+        self._post(message, self.timeout).close()  # servers answer 202 Accepted with no body
+
+    def _request(
+        self, method: str, params: dict[str, Any] | None = None, timeout: float | None = None
+    ) -> dict[str, Any]:
+        wait = self.timeout if timeout is None else timeout
+        with self._id_lock:
+            self._next_id += 1
+            rid = self._next_id
+        message = {"jsonrpc": "2.0", "id": rid, "method": method, "params": params or {}}
+        resp = self._post(message, wait)
+        try:
+            with resp:
+                if method == "initialize" and resp.headers.get("Mcp-Session-Id"):
+                    self.session_id = resp.headers["Mcp-Session-Id"]
+                if resp.headers.get_content_type() == "text/event-stream":
+                    msg = self._read_sse(resp, rid, wait)
+                else:
+                    msg = self._read_json(resp, rid)
+        except TimeoutError as exc:
+            raise self._timeout_error(wait, method) from exc
+        except (OSError, http.client.HTTPException) as exc:
+            raise MCPError(
+                f"connection to MCP server '{self.name}' was interrupted: {exc}"
+            ) from exc
+
+        if "error" in msg:
+            err = msg["error"] if isinstance(msg["error"], dict) else {}
+            raise MCPError(
+                f"MCP '{method}' failed: {err.get('message', 'unknown error')} "
+                f"(code {err.get('code', '?')})"
+            )
+        result = msg.get("result")
+        return result if isinstance(result, dict) else {}
+
+    def _read_json(self, resp: Any, rid: int) -> dict[str, Any]:
+        body = resp.read()
+        if not body:
+            raise MCPError(f"MCP server '{self.name}' sent no response to a request")
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise MCPError(f"MCP server '{self.name}' sent invalid JSON: {exc}") from exc
+        for item in data if isinstance(data, list) else [data]:
+            if isinstance(item, dict) and item.get("id") == rid:
+                return item
+        raise MCPError(f"MCP server '{self.name}' answered a different request id")
+
+    def _read_sse(self, resp: Any, rid: int, wait: float) -> dict[str, Any]:
+        """Read events until the response to `rid` arrives; answer server requests on the way."""
+        data_lines: list[str] = []
+        for raw in resp:
+            line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+            if line == "":
+                found = self._handle_event(data_lines, rid, wait)
+                data_lines = []
+                if found is not None:
+                    return found
+            elif line.startswith("data:"):
+                chunk = line[5:]
+                data_lines.append(chunk[1:] if chunk.startswith(" ") else chunk)
+        found = self._handle_event(data_lines, rid, wait)  # a final event without a blank line
+        if found is not None:
+            return found
+        raise MCPError(f"MCP server '{self.name}' ended the stream without a response")
+
+    def _handle_event(self, data_lines: list[str], rid: int, wait: float) -> dict[str, Any] | None:
+        if not data_lines:
+            return None
+        try:
+            msg = json.loads("\n".join(data_lines))
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(msg, dict):
+            return None
+        if "method" in msg:
+            if "id" in msg:  # a request from the server; we advertise no capabilities
+                self._reply_to_server(msg, wait)
+            return None  # notifications (logging, progress, ...) are ignored
+        if msg.get("id") == rid and ("result" in msg or "error" in msg):
+            return msg
+        return None
+
+    def _reply_to_server(self, msg: dict[str, Any], wait: float) -> None:
+        if msg.get("method") == "ping":
+            reply: dict[str, Any] = {"jsonrpc": "2.0", "id": msg["id"], "result": {}}
+        else:
+            reply = {
+                "jsonrpc": "2.0",
+                "id": msg["id"],
+                "error": {"code": -32601, "message": "Method not found"},
+            }
+        try:
+            self._post(reply, wait).close()
+        except (MCPError, OSError):
+            pass
+
+
 # --------------------------------------------------------------------------- tool adapter
 _NAME_BAD = re.compile(r"[^a-zA-Z0-9_-]")
 
@@ -340,7 +618,7 @@ def prune_null_args(args: dict[str, Any], schema: dict[str, Any]) -> dict[str, A
     return {k: v for k, v in args.items() if v is not None or _allows_null(props.get(k))}
 
 
-def _make_caller(client: MCPClient, tool_name: str, schema: dict[str, Any]) -> Any:
+def _make_caller(client: MCPConnection, tool_name: str, schema: dict[str, Any]) -> Any:
     def call(args: dict[str, Any]) -> str:
         text, is_error = client.call_tool(tool_name, prune_null_args(args, schema))
         if is_error:
@@ -351,7 +629,7 @@ def _make_caller(client: MCPClient, tool_name: str, schema: dict[str, Any]) -> A
 
 
 def mcp_tools(
-    client: MCPClient,
+    client: MCPConnection,
     *,
     include: Iterable[str] | None = None,
     exclude: Iterable[str] = (),
@@ -401,13 +679,15 @@ def mcp_tools(
 @dataclass
 class MCPServerSpec:
     name: str
-    command: str
+    command: str = ""
     args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
     cwd: str | None = None
     include: list[str] | None = None
     exclude: list[str] = field(default_factory=list)
     trust_read_only_hint: bool = True
+    url: str | None = None  # set for Streamable HTTP servers instead of `command`
+    headers: dict[str, str] = field(default_factory=dict)
 
 
 def load_mcp_config(path: str | Path) -> list[MCPServerSpec]:
@@ -427,8 +707,30 @@ def load_mcp_config(path: str | Path) -> list[MCPServerSpec]:
     for name, cfg in servers.items():
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", name):
             raise MCPError(f"invalid MCP server name '{name}' (use letters, digits, _ and -)")
-        if not isinstance(cfg, dict) or not isinstance(cfg.get("command"), str):
+        if not isinstance(cfg, dict):
+            raise MCPError(
+                f"MCP server '{name}' needs a string 'command' (stdio) or a 'url' (http)"
+            )
+        command, url = cfg.get("command"), cfg.get("url")
+        if command is None and url is None:
+            raise MCPError(
+                f"MCP server '{name}' needs a string 'command' (stdio) or a 'url' (http)"
+            )
+        if command is not None and url is not None:
+            raise MCPError(f"MCP server '{name}' needs exactly one of 'command' or 'url'")
+        if command is not None and not isinstance(command, str):
             raise MCPError(f"MCP server '{name}' needs a string 'command'")
+        if url is not None:
+            if not isinstance(url, str):
+                raise MCPError(f"MCP server '{name}' needs a string 'url'")
+            if cfg.get("type") not in (None, "http", "streamable-http"):
+                raise MCPError(
+                    f"MCP server '{name}': transport '{cfg.get('type')}' is not supported "
+                    "(use stdio, or Streamable HTTP via 'url')"
+                )
+        headers = cfg.get("headers", {})
+        if not isinstance(headers, dict) or not all(isinstance(v, str) for v in headers.values()):
+            raise MCPError(f"MCP server '{name}': 'headers' must map names to strings")
         args = cfg.get("args", [])
         env = cfg.get("env", {})
         if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
@@ -438,7 +740,9 @@ def load_mcp_config(path: str | Path) -> list[MCPServerSpec]:
         specs.append(
             MCPServerSpec(
                 name=name,
-                command=cfg["command"],
+                command=command or "",
+                url=url,
+                headers=headers,
                 args=args,
                 env=env,
                 cwd=cfg.get("cwd"),
@@ -456,20 +760,26 @@ class MCPToolbox:
     def __init__(self, specs: list[MCPServerSpec], timeout: float = 30.0) -> None:
         self.specs = specs
         self.timeout = timeout
-        self.clients: list[MCPClient] = []
+        self.clients: list[MCPConnection] = []
         self.tools: list[Tool] = []
 
     def start(self) -> MCPToolbox:
         try:
             for spec in self.specs:
-                client = MCPClient(
-                    spec.name,
-                    spec.command,
-                    spec.args,
-                    env=spec.env,
-                    cwd=spec.cwd,
-                    timeout=self.timeout,
-                ).start()
+                client: MCPConnection
+                if spec.url:
+                    client = MCPHTTPClient(
+                        spec.name, spec.url, headers=spec.headers, timeout=self.timeout
+                    ).start()
+                else:
+                    client = MCPClient(
+                        spec.name,
+                        spec.command,
+                        spec.args,
+                        env=spec.env,
+                        cwd=spec.cwd,
+                        timeout=self.timeout,
+                    ).start()
                 self.clients.append(client)
                 self.tools += mcp_tools(
                     client,
