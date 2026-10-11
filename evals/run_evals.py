@@ -86,6 +86,21 @@ def run_case(case: dict[str, Any], llm: LLM) -> dict[str, Any]:
     }
 
 
+def safe_run(case: dict[str, Any], llm: LLM) -> dict[str, Any]:
+    """Provider failures count as a failed run instead of aborting the whole eval session."""
+    try:
+        return run_case(case, llm)
+    except LLMError as exc:
+        return {
+            "name": case["name"],
+            "passed": False,
+            "failures": [f"error: {exc}"],
+            "steps": 0,
+            "tokens": 0,
+            "tools": [],
+        }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("-k", help="substring filter on case name")
@@ -120,11 +135,7 @@ def main() -> int:
 
     rows: list[dict[str, Any]] = []
     for case in cases:
-        try:
-            runs = [run_case(case, llm) for _ in range(args.repeat)]
-        except LLMError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
+        runs = [safe_run(case, llm) for _ in range(args.repeat)]
         passed = sum(r["passed"] for r in runs)
         rows.append({"name": case["name"], "pass_rate": passed / len(runs), "runs": runs})
         mark = "PASS" if passed == len(runs) else "FAIL"
