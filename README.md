@@ -79,6 +79,41 @@ with MCPToolbox(load_mcp_config("examples/mcp.json")) as box:
     print(agent.run("Slugify 'Hello World'").output)
 ```
 
+### Verified against a real third-party server
+
+Tested manually on Windows 11 with the official filesystem server and a small local model
+(`qwen2.5:3b` via Ollama, CPU only): the agent called `files__read_text_file` and returned the
+file's contents in 2 steps (October 2026). This is a manual check, not part of the automated
+suite (which uses the bundled demo server over a real subprocess instead).
+
+```json
+{
+  "mcpServers": {
+    "files": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:\\Users\\you\\Documents\\notes"]
+    }
+  }
+}
+```
+
+```bash
+agentforge mcp-tools mcp-files.json
+agentforge run "Read C:\\Users\\you\\Documents\\notes\\ide.txt and tell me what it says" \
+  --provider openai --model qwen2.5:3b --mcp-config mcp-files.json
+```
+
+Practical notes:
+
+- Run the `npx` command once by hand first: the first run downloads the package, which can exceed
+  the 30 s handshake timeout.
+- Grant the server one dedicated folder, never a whole drive.
+- Small models often send `null` for optional parameters they do not need, which strict servers
+  reject. The client drops those `null`s unless the tool's schema allows them. This was the root
+  cause of the failure found during this verification.
+- Tool failures are visible in the trace (`output_preview` on `tool_call` events); successful
+  outputs are not recorded unless you opt in with `Agent(trace_outputs="all")`.
+
 Security model (MCP servers are third-party code, so they are treated as untrusted):
 
 - The server process gets a **minimal environment**; your API keys are never inherited.
