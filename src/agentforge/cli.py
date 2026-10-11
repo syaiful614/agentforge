@@ -7,6 +7,7 @@ import atexit
 import json
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 from .agent import Agent
 from .builtin_tools import default_registry
@@ -15,24 +16,41 @@ from .guardrails import ApprovalPolicy, Budget, allow_all, cli_prompt
 from .llm import LLM, LLMError, make_llm
 from .mcp_client import MCPError, MCPToolbox, load_mcp_config
 from .memory import LongTermMemory
-from .orchestrator import Orchestrator
+from .orchestrator import Orchestrator, default_workers, with_extra_tools
 from .tools import ToolRegistry
 from .tracing import Tracer
 
 
-def _build(
-    args: argparse.Namespace,
-) -> tuple[LLM, ToolRegistry, Tracer, ApprovalPolicy, Budget]:
+class Runtime(NamedTuple):
+    llm: LLM
+    tools: ToolRegistry
+    tracer: Tracer
+    approval: ApprovalPolicy
+    budget: Budget
+    mcp_read_only: list[str]  # MCP tools safe to hand to orchestrator workers
+
+
+def _build(args: argparse.Namespace) -> Runtime:
+    mcp_config = getattr(args, "mcp_config", None)
+    mcp_only = getattr(args, "mcp_only", False)
+    if mcp_only and not mcp_config:
+        raise MCPError("--mcp-only requires --mcp-config")
+
     s = Settings.from_env()
     workspace = Path(args.workspace or s.workspace)
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / ".agentforge").mkdir(exist_ok=True)
     ltm = LongTermMemory(str(workspace / ".agentforge" / "memory.db"))
     tools = default_registry(workspace, ltm)
-    if getattr(args, "mcp_config", None):
-        toolbox = MCPToolbox(load_mcp_config(args.mcp_config)).start()
+    mcp_read_only: list[str] = []
+    if mcp_config:
+        toolbox = MCPToolbox(load_mcp_config(mcp_config)).start()
         atexit.register(toolbox.close)  # never leave server processes behind
-        toolbox.register_into(tools)
+        mcp_read_only = [t.name for t in toolbox.tools if t.parallel_safe]
+        if mcp_only:
+            tools = ToolRegistry(toolbox.tools)  # hide built-ins: fewer choices for small models
+        else:
+            toolbox.register_into(tools)
     tracer = Tracer(Path(args.trace) if args.trace else s.trace_dir / "latest.jsonl")
     approval = allow_all if args.yes else cli_prompt
     budget = Budget(max_steps=args.max_steps, max_tokens=args.max_tokens)
@@ -44,15 +62,17 @@ def _build(
         base_url=args.base_url or s.base_url,
         timeout=s.timeout_s,
     )
-    return llm, tools, tracer, approval, budget
+    return Runtime(llm, tools, tracer, approval, budget, mcp_read_only)
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    llm, tools, tracer, approval, budget = _build(args)
+    rt = _build(args)
+    llm, tools, tracer, approval, budget = rt[:5]
     if args.orchestrate:
         orch = Orchestrator(
             llm,
             tools,
+            workers=with_extra_tools(default_workers(), rt.mcp_read_only),
             budget=budget,
             approval=approval,
             tracer=tracer,
@@ -78,7 +98,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
 
 def _cmd_chat(args: argparse.Namespace) -> int:
-    llm, tools, tracer, approval, budget = _build(args)
+    llm, tools, tracer, approval, budget = _build(args)[:5]
     agent = Agent(llm, tools, budget=budget, approval=approval, tracer=tracer)
     print("AgentForge chat. Ctrl-D to exit, /reset to clear memory.", file=sys.stderr)
     while True:
@@ -125,6 +145,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     common.add_argument(
         "--mcp-config", help="JSON file listing MCP servers (see examples/mcp.json)"
+    )
+    common.add_argument(
+        "--mcp-only",
+        action="store_true",
+        help="Expose only MCP tools to the agent (hide the built-in tools)",
     )
     common.add_argument("--workspace", help="Directory the file tools are confined to")
     common.add_argument("--trace", help="JSONL trace output path")

@@ -99,6 +99,23 @@ def default_workers() -> dict[str, WorkerSpec]:
     }
 
 
+def with_extra_tools(
+    workers: dict[str, WorkerSpec],
+    names: list[str],
+    roles: tuple[str, ...] = ("researcher", "analyst"),
+) -> dict[str, WorkerSpec]:
+    """Grant extra (e.g. read-only MCP) tools to selected worker roles, leaving others untouched.
+
+    Worker tool lists are fixed names, so tools discovered at runtime would otherwise never
+    reach them. The writer role stays tool-free by default (least privilege).
+    """
+    out: dict[str, WorkerSpec] = {}
+    for role, spec in workers.items():
+        extra = [n for n in names if n not in spec.tools] if role in roles else []
+        out[role] = WorkerSpec(spec.system_prompt, [*spec.tools, *extra])
+    return out
+
+
 PLANNER_SYSTEM = (
     "You are a planning agent. Decompose the user's task into the FEWEST subtasks that "
     "solve it (often 1-4). Make subtasks independent where possible so they can run in "

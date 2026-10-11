@@ -66,6 +66,11 @@ agentforge run "Slugify 'Belajar Agent Developer 2026' and count its words" \
 { "mcpServers": { "demo": { "command": "python", "args": ["examples/mcp_demo_server.py"] } } }
 ```
 
+By default MCP tools are added next to the built-in ones. Small models often pick a familiar
+built-in (`list_dir`) over the MCP tool you meant, so add `--mcp-only` to expose **only** MCP
+tools. In `--orchestrate` mode, workers receive just the *read-only* MCP tools (write tools are
+never granted to them), and the writer role stays tool-free.
+
 Optional per-server keys: `env`, `cwd`, `include` / `exclude` (allow-list by the server's own tool
 names), and `trustReadOnlyHints` (set `false` to require approval for every tool).
 
@@ -190,7 +195,7 @@ make eval     # live evals against the real model (needs ANTHROPIC_API_KEY)
 python evals/run_evals.py --repeat 3   # pass-rate under stochasticity
 ```
 
-The unit suite (100 tests, including real MCP subprocess round-trips) uses scripted/fake LLMs, so the loop, guardrails, memory
+The unit suite (110 tests, including real MCP subprocess round-trips) uses scripted/fake LLMs, so the loop, guardrails, memory
 compaction, DAG planning and review loop are verified without network access.
 
 ## Eval results

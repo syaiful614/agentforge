@@ -331,3 +331,85 @@ def test_trace_output_modes(client):
     )
     with pytest.raises(ValueError, match="trace_outputs"):
         Agent(ScriptedLLM([]), ToolRegistry(), trace_outputs="everything")
+
+
+# ------------------------------------------------------------------ --mcp-only and workers
+def _run_cli(tmp_path, monkeypatch, llm, *extra):
+    cfg = _config(tmp_path, {"demo": {"command": sys.executable, "args": [SERVER]}})
+    monkeypatch.setattr(cli, "make_llm", lambda *a, **k: llm)
+    monkeypatch.setenv("AGENTFORGE_TRACE_DIR", str(tmp_path / "traces"))
+    argv = ["run", "x", "--workspace", str(tmp_path / "ws"), "--mcp-config", str(cfg), *extra]
+    return cli.main(argv)
+
+
+def _offered_tools(call):
+    return {t["name"] for t in call["tools"]}
+
+
+def test_default_mode_offers_builtin_and_mcp_tools(tmp_path, monkeypatch):
+    llm = ScriptedLLM([text("ok")])
+    assert _run_cli(tmp_path, monkeypatch, llm) == 0
+    offered = _offered_tools(llm.calls[0])
+    assert {"calculator", "read_file", "demo__slugify"} <= offered
+
+
+def test_mcp_only_hides_builtin_tools(tmp_path, monkeypatch):
+    llm = ScriptedLLM([text("ok")])
+    assert _run_cli(tmp_path, monkeypatch, llm, "--mcp-only") == 0
+    offered = _offered_tools(llm.calls[0])
+    assert offered and all(n.startswith("demo__") for n in offered)
+    assert "read_file" not in offered and "calculator" not in offered
+
+
+def test_mcp_only_requires_a_config(tmp_path, capsys):
+    assert cli.main(["run", "x", "--mcp-only", "--workspace", str(tmp_path)]) == 1
+    assert "--mcp-only requires --mcp-config" in capsys.readouterr().err
+
+
+def _orchestration_llm():
+    from fakes import RouterLLM
+
+    def handle(kw):
+        choice = kw.get("tool_choice")
+        if choice and choice["name"] == "submit_plan":
+            plan = {"subtasks": [{"id": "t1", "goal": "go", "role": "researcher"}]}
+            return tool_use(("submit_plan", plan))
+        if choice and choice["name"] == "submit_review":
+            return tool_use(("submit_review", {"approved": True}))
+        return text("final" if "SYNTHESIZER" in kw["system"] else "worker done")
+
+    return RouterLLM(handle)
+
+
+def _worker_tools(llm):
+    calls = [
+        c for c in llm.calls if "meticulous researcher" in c["system"] and not c.get("tool_choice")
+    ]
+    assert calls
+    return _offered_tools(calls[0])
+
+
+def test_orchestrator_workers_receive_only_read_only_mcp_tools(tmp_path, monkeypatch):
+    llm = _orchestration_llm()
+    assert _run_cli(tmp_path, monkeypatch, llm, "--orchestrate") == 0
+    tools = _worker_tools(llm)
+    assert {"demo__slugify", "demo__word_stats", "read_file"} <= tools  # built-in + MCP read-only
+    assert "demo__add_note" not in tools  # write tools are never granted to workers
+
+
+def test_orchestrator_with_mcp_only_gives_workers_just_mcp_read_only(tmp_path, monkeypatch):
+    llm = _orchestration_llm()
+    assert _run_cli(tmp_path, monkeypatch, llm, "--orchestrate", "--mcp-only") == 0
+    tools = _worker_tools(llm)
+    assert tools and all(n.startswith("demo__") for n in tools) and "demo__add_note" not in tools
+
+
+def test_with_extra_tools_only_touches_the_chosen_roles():
+    from agentforge.orchestrator import default_workers, with_extra_tools
+
+    base = default_workers()
+    out = with_extra_tools(base, ["x__a", "read_file"])
+    assert "x__a" in out["researcher"].tools and "x__a" in out["analyst"].tools
+    assert out["researcher"].tools.count("read_file") == 1  # no duplicates
+    assert out["writer"].tools == []  # least privilege preserved
+    assert "x__a" not in base["researcher"].tools  # input not mutated
