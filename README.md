@@ -20,6 +20,7 @@ AgentForge treats those as first-class design problems.
 |---|---|
 | **Agent loop** | Native tool use, parallel read-only tool calls, step/token/time budgets |
 | **Typed tools** | `@tool` derives JSON schema from type hints, validates args, returns errors to the model |
+| **MCP client** | Use tools from external MCP servers (stdio, from-scratch JSON-RPC); namespaced, allow-listable, approval-gated by default |
 | **Multi-agent** | Planner → DAG of parallel workers → synthesizer → critic (reflection loop) |
 | **Structured output** | Forced tool call + pydantic validation + self-repair retries |
 | **Memory** | Context compaction (never splits tool pairs) + persistent SQLite long-term memory |
@@ -45,6 +46,47 @@ agentforge chat                                   # interactive, with memory
 ```
 
 Risky tools (`write_file`) prompt for approval on the terminal; pass `-y` to auto-approve.
+
+## MCP: use tools from external servers
+
+[MCP](https://modelcontextprotocol.io) lets an agent call tools hosted by other processes
+(filesystem, GitHub, databases...) instead of hand-writing each one. AgentForge ships a small
+MCP client written from the spec (JSON-RPC 2.0 over stdio, stdlib only) and a dependency-free
+demo server so you can try it without Node.
+
+```bash
+agentforge mcp-tools examples/mcp.json        # connect, handshake, list discovered tools
+agentforge run "Slugify 'Belajar Agent Developer 2026' and count its words" \
+  --mcp-config examples/mcp.json
+```
+
+`examples/mcp.json` uses the standard format:
+
+```json
+{ "mcpServers": { "demo": { "command": "python", "args": ["examples/mcp_demo_server.py"] } } }
+```
+
+Optional per-server keys: `env`, `cwd`, `include` / `exclude` (allow-list by the server's own tool
+names), and `trustReadOnlyHints` (set `false` to require approval for every tool).
+
+As a library:
+
+```python
+from agentforge import Agent, MCPToolbox, ToolRegistry, load_mcp_config
+
+with MCPToolbox(load_mcp_config("examples/mcp.json")) as box:
+    agent = Agent(llm, ToolRegistry(box.tools))
+    print(agent.run("Slugify 'Hello World'").output)
+```
+
+Security model (MCP servers are third-party code, so they are treated as untrusted):
+
+- The server process gets a **minimal environment**; your API keys are never inherited.
+  Pass what it needs explicitly via `env`.
+- Tools are named `<server>__<tool>` and require **approval by default**. Only tools the server
+  marks `readOnlyHint: true` run without it, and hints are advisory, so connect trusted servers only.
+- Descriptions are length-capped and results are wrapped as untrusted data like any tool output.
+- Timeouts never hang the agent; a crashed server fails pending calls with a clear error.
 
 ## Providers (including free ones)
 
@@ -113,7 +155,7 @@ make eval     # live evals against the real model (needs ANTHROPIC_API_KEY)
 python evals/run_evals.py --repeat 3   # pass-rate under stochasticity
 ```
 
-The unit suite (71 tests) uses scripted/fake LLMs, so the loop, guardrails, memory
+The unit suite (100 tests, including real MCP subprocess round-trips) uses scripted/fake LLMs, so the loop, guardrails, memory
 compaction, DAG planning and review loop are verified without network access.
 
 ## Eval results
@@ -158,13 +200,14 @@ src/agentforge/
   guardrails.py     budgets, approval policies, loop detector
   structured.py     reliable structured output
   tracing.py        JSONL tracer
+  mcp_client.py     MCP stdio client, tool adapter, config loader
   llm.py            provider protocol + Anthropic adapter
 evals/              live eval harness, cases, fixtures
 tests/              offline test-suite with fake LLMs
 ```
 
 ## Roadmap
-Streaming · MCP client · embedding-based memory · USD cost budgets · container sandbox for code tools.
+Streaming · MCP over HTTP + resources/prompts · embedding-based memory · USD cost budgets · container sandbox for code tools.
 
 ## License
 MIT

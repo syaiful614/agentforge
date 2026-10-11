@@ -38,6 +38,10 @@ def truncate(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
     return text[:limit] + f"\n... [truncated {len(text) - limit} chars]"
 
 
+class ToolError(Exception):
+    """Raise from a tool to report a failure to the model without a type-name prefix."""
+
+
 @dataclass
 class ToolResult:
     content: str
@@ -50,7 +54,7 @@ class Tool:
     description: str
     input_schema: dict[str, Any]
     fn: Callable[..., Any]
-    model: type[BaseModel]
+    model: type[BaseModel] | None = None  # None => raw JSON-schema tool (e.g. from MCP)
     read_only: bool = True
     requires_approval: bool = False
 
@@ -66,17 +70,34 @@ class Tool:
         return self.read_only and not self.requires_approval
 
     def run(self, raw: dict[str, Any] | None) -> ToolResult:
-        try:
-            args = self.model.model_validate(raw or {})
-        except ValidationError as exc:
-            detail = "; ".join(
-                f"{'.'.join(str(p) for p in e['loc']) or 'input'}: {e['msg']}" for e in exc.errors()
-            )
-            return ToolResult(f"Invalid arguments for '{self.name}': {detail}", True)
+        call: Callable[[], Any]
+        if self.model is None:
+            # Raw JSON-schema tool: only check that required fields are present.
+            payload = raw if isinstance(raw, dict) else {}
+            missing = [k for k in self.input_schema.get("required", []) if k not in payload]
+            if missing:
+                fields = ", ".join(missing)
+                return ToolResult(
+                    f"Invalid arguments for '{self.name}': missing required field(s): {fields}",
+                    True,
+                )
+            call = lambda: self.fn(payload)  # noqa: E731
+        else:
+            try:
+                args = self.model.model_validate(raw or {})
+            except ValidationError as exc:
+                detail = "; ".join(
+                    f"{'.'.join(str(p) for p in e['loc']) or 'input'}: {e['msg']}"
+                    for e in exc.errors()
+                )
+                return ToolResult(f"Invalid arguments for '{self.name}': {detail}", True)
+            kwargs = {k: getattr(args, k) for k in type(args).model_fields}
+            call = lambda: self.fn(**kwargs)  # noqa: E731
 
-        kwargs = {k: getattr(args, k) for k in type(args).model_fields}
         try:
-            out = self.fn(**kwargs)
+            out = call()
+        except ToolError as exc:
+            return ToolResult(truncate(str(exc)), True)
         except Exception as exc:  # tool bugs must never kill the agent loop
             return ToolResult(f"{type(exc).__name__}: {exc}", True)
         if not isinstance(out, str):

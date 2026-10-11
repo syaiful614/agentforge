@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import sys
 from pathlib import Path
@@ -12,6 +13,7 @@ from .builtin_tools import default_registry
 from .config import Settings
 from .guardrails import ApprovalPolicy, Budget, allow_all, cli_prompt
 from .llm import LLM, LLMError, make_llm
+from .mcp_client import MCPError, MCPToolbox, load_mcp_config
 from .memory import LongTermMemory
 from .orchestrator import Orchestrator
 from .tools import ToolRegistry
@@ -27,6 +29,10 @@ def _build(
     (workspace / ".agentforge").mkdir(exist_ok=True)
     ltm = LongTermMemory(str(workspace / ".agentforge" / "memory.db"))
     tools = default_registry(workspace, ltm)
+    if getattr(args, "mcp_config", None):
+        toolbox = MCPToolbox(load_mcp_config(args.mcp_config)).start()
+        atexit.register(toolbox.close)  # never leave server processes behind
+        toolbox.register_into(tools)
     tracer = Tracer(Path(args.trace) if args.trace else s.trace_dir / "latest.jsonl")
     approval = allow_all if args.yes else cli_prompt
     budget = Budget(max_steps=args.max_steps, max_tokens=args.max_tokens)
@@ -89,6 +95,17 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         print(f"agent> {res.output}\n")
 
 
+def _cmd_mcp_tools(args: argparse.Namespace) -> int:
+    with MCPToolbox(load_mcp_config(args.config)) as box:
+        for client in box.clients:
+            info = client.server_info
+            print(f"# {client.name}: {info.get('name', '?')} (protocol {client.protocol_version})")
+        for t in box.tools:
+            flags = "read-only" if t.parallel_safe else "approval"
+            print(f"{t.name:<28} [{flags}] {t.description.splitlines()[0][:70]}")
+    return 0
+
+
 def _cmd_tools(args: argparse.Namespace) -> int:
     tools = default_registry(Path(args.workspace or "."), LongTermMemory())
     for name in tools.names:
@@ -105,6 +122,9 @@ def main(argv: list[str] | None = None) -> int:
     common.add_argument("--provider", choices=["anthropic", "openai"], help="LLM backend")
     common.add_argument(
         "--base-url", help="OpenAI-compatible endpoint, e.g. http://localhost:11434/v1"
+    )
+    common.add_argument(
+        "--mcp-config", help="JSON file listing MCP servers (see examples/mcp.json)"
     )
     common.add_argument("--workspace", help="Directory the file tools are confined to")
     common.add_argument("--trace", help="JSONL trace output path")
@@ -124,6 +144,10 @@ def main(argv: list[str] | None = None) -> int:
     c = sub.add_parser("chat", parents=[common], help="Interactive session")
     c.set_defaults(fn=_cmd_chat)
 
+    m = sub.add_parser("mcp-tools", help="Connect to MCP servers and list their tools")
+    m.add_argument("config", help="MCP config JSON file")
+    m.set_defaults(fn=_cmd_mcp_tools)
+
     t = sub.add_parser("tools", help="List built-in tools")
     t.add_argument("--workspace")
     t.set_defaults(fn=_cmd_tools)
@@ -131,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     try:
         return int(args.fn(args))
-    except LLMError as exc:
+    except (LLMError, MCPError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 

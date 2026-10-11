@@ -69,12 +69,22 @@ from existing evidence rather than re-running workers, which bounds cost.
 `structured_output()` forces a tool call whose schema is a pydantic model, validates, and on
 failure feeds the validation error back (as a proper `tool_result`) for up to N retries.
 
-### 7. Observability by default
+### 7. MCP: external tools without trusting the server
+The MCP client speaks JSON-RPC over stdio from the spec (no SDK). A reader thread routes
+responses to waiting callers by request id, so concurrent read-only tool calls share one
+connection; a timed-out request is cancelled and its late reply ignored. Servers are third-party
+code, so: minimal child environment (no inherited API keys), `<server>__<tool>` namespacing,
+approval required unless the server declares `readOnlyHint` (advisory, off-switch available),
+capped descriptions (tool-poisoning surface), include/exclude allow-lists, and results wrapped
+as untrusted data. `Tool.model=None` marks raw-JSON-schema tools, validated only for required
+fields; the server remains the authority on its own schema.
+
+### 8. Observability by default
 Every LLM call, tool call, denial, loop detection and compaction is a JSONL event with
 `run_id`, agent name and timings — greppable, loadable into pandas, or shippable to any
 tracing backend.
 
-### 8. Evals grade trajectories, not just answers
+### 9. Evals grade trajectories, not just answers
 `evals/run_evals.py` checks the answer *and* which tools ran, how many steps were used, and
 whether forbidden side effects occurred. `--repeat N` measures pass-rate under stochasticity.
 
@@ -83,4 +93,4 @@ whether forbidden side effects occurred. `--repeat N` measures pass-rate under s
 - Tools run in-process; untrusted code execution needs a real sandbox (container/gVisor).
 - No streaming yet; add `generate_stream()` to the `LLM` protocol.
 - Cost accounting is token-based; add per-model pricing for USD budgets.
-- MCP client support for loading external tool servers.
+- MCP: HTTP transport, resources/prompts, and `tools/list_changed` refresh (stdio tools only today).

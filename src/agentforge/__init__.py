@@ -1,5 +1,6 @@
 """AgentForge: a production-minded agent framework built from first principles."""
 
+from ._version import __version__
 from .agent import Agent, AgentResult
 from .builtin_tools import default_registry, make_file_tools, make_memory_tools
 from .guardrails import (
@@ -20,15 +21,15 @@ from .llm import (
     Usage,
     make_llm,
 )
+from .mcp_client import MCPClient, MCPError, MCPToolbox, load_mcp_config, mcp_tools
 from .memory import ConversationMemory, LongTermMemory
 from .orchestrator import Orchestrator, OrchestratorResult, Plan, WorkerSpec
 from .structured import structured_output
-from .tools import Tool, ToolRegistry, tool
+from .tools import Tool, ToolError, ToolRegistry, tool
 from .tracing import Tracer
 
-__version__ = "0.1.0"
-
 __all__ = [
+    "__version__",
     "LLM",
     "Agent",
     "AgentResult",
@@ -38,12 +39,16 @@ __all__ = [
     "ConversationMemory",
     "LLMError",
     "LLMResponse",
+    "MCPClient",
+    "MCPError",
+    "MCPToolbox",
     "LongTermMemory",
     "Orchestrator",
     "OpenAICompatLLM",
     "OrchestratorResult",
     "Plan",
     "Tool",
+    "ToolError",
     "ToolCall",
     "ToolRegistry",
     "Tracer",
@@ -53,9 +58,11 @@ __all__ = [
     "cli_prompt",
     "default_registry",
     "deny_all",
+    "load_mcp_config",
     "make_file_tools",
     "make_llm",
     "make_memory_tools",
+    "mcp_tools",
     "read_only_only",
     "structured_output",
     "tool",
