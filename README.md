@@ -168,9 +168,12 @@ stays clean. Steps are separated by a blank line. `--stream` is not available wi
 As a library, pass callbacks to the agent:
 
 ```python
-agent = Agent(llm, tools,
-              on_text=lambda delta: print(delta, end="", flush=True),
-              on_tool=lambda name, args: print(f"[{name}]"))
+agent = Agent(
+    llm,
+    tools,
+    on_text=lambda delta: print(delta, end="", flush=True),
+    on_tool=lambda name, args: print(f"[{name}]"),
+)
 ```
 
 Design notes:
