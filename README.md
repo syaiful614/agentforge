@@ -1,6 +1,6 @@
 # AgentForge
 
-[![CI](https://github.com/MuhammadSyaiful16/agentforge/actions/workflows/ci.yml/badge.svg)](https://github.com/MuhammadSyaiful16/agentforge/actions)
+[![CI](https://github.com/syaiful614/agentforge/actions/workflows/ci.yml/badge.svg)](https://github.com/syaiful614/agentforge/actions)
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
@@ -35,7 +35,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design decisions and th
 ## Quickstart
 
 ```bash
-git clone https://github.com/MuhammadSyaiful16/agentforge && cd agentforge
+git clone https://github.com/syaiful614/agentforge && cd agentforge
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 cp .env.example .env && export ANTHROPIC_API_KEY=sk-ant-...
